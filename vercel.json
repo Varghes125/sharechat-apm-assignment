@@ -3,7 +3,7 @@
   "rewrites": [
     {
       "source": "/api/update_trends",
-      "dest": "/api/update_trends.py"
+      "destination": "/api/update_trends.py"
     }
   ],
   "crons": [
