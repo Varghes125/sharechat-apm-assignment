@@ -9,9 +9,7 @@
   "crons": [
     {
       "path": "/api/update_trends",
-      "schedule": "0 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
-
-
