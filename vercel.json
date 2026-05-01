@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/update_trends",
+      "dest": "/api/update_trends.py"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/update_trends",
+      "schedule": "0 * * * *"
+    }
+  ]
+}
