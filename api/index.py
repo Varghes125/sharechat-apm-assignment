@@ -1,6 +1,7 @@
-import json
-def handler(request, context):
-    return {
-        "statusCode": 200,
-        "body": "Working"
-    }
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/api/update_trends")
+def update_trends():
+    return {"status": "Vercel found the handler!"}
