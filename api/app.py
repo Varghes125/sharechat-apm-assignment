@@ -230,9 +230,7 @@ def update_trends():
             "tag_name": data["tag_name"],
             "description": data["description"],
             "category": data["category"],
-            "heat_score": int(total_score),
-            "source": ", ".join(data["sources"])
-            
+            "heat_score": int(total_score)
         })
 
     final_sorted = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)
