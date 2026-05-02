@@ -105,26 +105,19 @@ def update_trends():
             "timestamp": datetime.datetime.utcnow()
         })
 
- # -------- Twitter (FIXED-ish) --------
-try:
-    req = urllib.request.Request(
-        "https://trends24.in/india/feed/",
-        headers={
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/rss+xml'
-        }
-    )
-    with urllib.request.urlopen(req) as res:
-        x_feed = feedparser.parse(res.read())
-
-    for entry in x_feed.entries[:5]:
-        raw_data.append({
-            "title": entry.title,
-            "source": "Twitter/X",
-            "timestamp": datetime.datetime.utcnow()
-        })
-except Exception as e:
-    print("Twitter fetch failed:", e)
+    # -------- Twitter --------
+    try:
+        req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as res:
+            x_feed = feedparser.parse(res.read())
+        for entry in x_feed.entries[:5]:
+            raw_data.append({
+                "title": entry.title,
+                "source": "Twitter/X",
+                "timestamp": datetime.datetime.utcnow()
+            })
+    except:
+        pass
 
     # -------- Google Trends --------
     trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
@@ -135,17 +128,14 @@ except Exception as e:
             "timestamp": datetime.datetime.utcnow()
         })
 
-# -------- YouTube (FIXED) --------
-yt_feed = feedparser.parse(
-    "https://www.youtube.com/feeds/videos.xml?search_query=trending+india"
-)
-
-for entry in yt_feed.entries[:5]:
-    raw_data.append({
-        "title": entry.title,
-        "source": "YouTube",
-        "timestamp": datetime.datetime.utcnow()
-    })
+    # -------- YouTube --------
+    yt_feed = feedparser.parse("https://www.youtube.com/feeds/videos.xml?chart=mostPopular&regionCode=IN")
+    for entry in yt_feed.entries[:5]:
+        raw_data.append({
+            "title": entry.title,
+            "source": "YouTube",
+            "timestamp": datetime.datetime.utcnow()
+        })
 
     # -------------------------------
     # Transform (NO SCORING)
