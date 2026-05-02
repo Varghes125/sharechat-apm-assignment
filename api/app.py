@@ -2,157 +2,212 @@ from fastapi import FastAPI
 from supabase import create_client
 import feedparser
 import os
-import math
+import re
+import datetime
 import urllib.request
-import requests
-from collections import Counter
+import urllib.parse
+import json
 
 app = FastAPI()
 
-# 1. Initialize Supabase
+# -------------------------------
+# 1. Supabase Setup
+# -------------------------------
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
-# 2. Hugging Face Configuration (Ensure HUGGINGFACE_TOKEN is in Vercel)
-HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
-# We use the MNLI model because it is designed to understand if a phrase matches a sentence's meaning
-HF_CLASSIFIER_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
-
-def get_ai_category(title):
-    """Classifies the headline into a functional theme."""
-    if not HF_TOKEN: return "General"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    candidate_labels = ["Politics", "Technology", "Entertainment", "Sports", "Finance", "International", "Crime"]
-    payload = {"inputs": title, "parameters": {"candidate_labels": candidate_labels}}
-    try:
-        response = requests.post(HF_CLASSIFIER_URL, headers=headers, json=payload, timeout=7)
-        return response.json()['labels'][0]
-    except: return "News"
+# -------------------------------
+# 2. Utility: Tag Generator (FREE)
+# -------------------------------
+STOPWORDS = set([
+    "the","is","at","which","on","and","a","an","in","to","for","of","with","by",
+    "from","that","this","it","as","are","was","were"
+])
 
 def generate_smart_tag(title):
-    """Extracts the most relevant 2-4 word theme by ranking candidates via AI."""
-    if not HF_TOKEN: 
-        return " ".join(title.split()[:2]).title()
-    
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    
-    # Clean the title: Remove source names, punctuation, and delimiters
-    # e.g., "ABP News: West Bengal Election..." -> "West Bengal Election..."
-    clean_title = title.split("|")[0].split("-")[0].split(":")[0].strip()
-    
-    # Generate potential candidate phrases from the headline
-    words = clean_title.split()
-    candidates = []
-    if len(words) >= 2:
-        candidates.append(" ".join(words[:2])) # e.g., "West Bengal"
-        candidates.append(" ".join(words[:3])) # e.g., "West Bengal Election"
-        if len(words) >= 4:
-            candidates.append(" ".join(words[:4])) # e.g., "West Bengal Election 2026"
-    else:
-        candidates = [clean_title]
+    title = title.lower()
+    title = re.sub(r'[^a-zA-Z0-9\s]', '', title)
 
-    # Ask the AI which of these candidates is the most accurate "Subject" of the full title
-    payload = {
-        "inputs": clean_title,
-        "parameters": {"candidate_labels": candidates}
-    }
-    
+    words = [w for w in title.split() if w not in STOPWORDS]
+
+    tag_words = words[:3] if len(words) >= 3 else words
+    return "#" + "".join([w.capitalize() for w in tag_words])
+
+
+# -------------------------------
+# 3. India Relevance Score
+# -------------------------------
+INDIA_KEYWORDS = [
+    "india","delhi","mumbai","bjp","modi","rbi","ipl",
+    "chennai","kolkata","bangalore","hyderabad"
+]
+
+def india_score(text):
+    text = text.lower()
+    return 1 if any(word in text for word in INDIA_KEYWORDS) else 0
+
+
+# -------------------------------
+# 4. Recency Score
+# -------------------------------
+def recency_score(ts):
+    diff = (datetime.datetime.utcnow() - ts).total_seconds()
+    return max(0, 1 - diff / 43200)  # 12 hour decay
+
+
+# -------------------------------
+# 5. Simple Category Classifier
+# -------------------------------
+def classify(text):
+    text = text.lower()
+    if "cricket" in text or "ipl" in text:
+        return "Sports"
+    elif "movie" in text or "ott" in text or "film" in text:
+        return "Entertainment"
+    elif "rbi" in text or "stock" in text or "market" in text:
+        return "Finance"
+    elif "election" in text or "bjp" in text or "government" in text:
+        return "Politics"
+    return "General"
+
+
+# -------------------------------
+# 6. Free Hindi Translation
+# -------------------------------
+def to_hindi(text):
     try:
-        response = requests.post(HF_CLASSIFIER_URL, headers=headers, json=payload, timeout=7)
-        result = response.json()
-        # The AI ranks the candidates; result['labels'][0] is the most semantically relevant
-        return result['labels'][0].title()
+        url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=hi&dt=t&q=" + urllib.parse.quote(text)
+        response = urllib.request.urlopen(url)
+        result = json.loads(response.read())
+        return result[0][0][0]
     except:
-        return " ".join([w for w in words if len(w) > 3][:2]).title()
+        return text
 
+
+# -------------------------------
+# 7. Root API
+# -------------------------------
 @app.get("/")
 def root():
-    return {"message": "ShareChat Trend Engine Active", "supabase_connected": supabase is not None}
+    return {
+        "message": "ShareChat Trend Engine Active",
+        "supabase_connected": supabase is not None
+    }
 
+
+# -------------------------------
+# 8. Main Trend Engine
+# -------------------------------
 @app.get("/update_trends")
 def update_trends():
-    if not supabase: return {"error": "Supabase missing"}
-    
-    # --- 1. BALANCED DATA INGESTION ---
+    if not supabase:
+        return {"error": "Supabase not configured"}
+
     raw_scraped_data = []
 
-    # Google News (10 items)
-    google_feed = feedparser.parse("https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi")
+    # -------- Google News --------
+    google_feed = feedparser.parse("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en")
     for entry in google_feed.entries[:10]:
-        raw_scraped_data.append({"title": entry.title, "source": "Google News", "base_weight": 100})
+        ts = datetime.datetime(*entry.published_parsed[:6]) if "published_parsed" in entry else datetime.datetime.utcnow()
+        raw_scraped_data.append({
+            "title": entry.title,
+            "source": "Google News",
+            "timestamp": ts
+        })
 
-    # X / Twitter (10 items)
+    # -------- Twitter (via Trends24) --------
     try:
         req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as res:
             x_feed = feedparser.parse(res.read())
         for entry in x_feed.entries[:10]:
-            raw_scraped_data.append({"title": entry.title, "source": "Twitter/X", "base_weight": 100})
-    except: pass
+            raw_scraped_data.append({
+                "title": entry.title,
+                "source": "Twitter/X",
+                "timestamp": datetime.datetime.utcnow()
+            })
+    except:
+        pass
 
-    # Reddit (10 items - Equal importance given)
+    # -------- Reddit --------
     reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
     for entry in reddit_feed.entries[:10]:
-        raw_scraped_data.append({"title": entry.title, "source": "Reddit", "base_weight": 100})
+        raw_scraped_data.append({
+            "title": entry.title,
+            "source": "Reddit",
+            "timestamp": datetime.datetime.utcnow()
+        })
 
-    # --- 2. AGGREGATION ENGINE ---
+    # -------------------------------
+    # 9. Aggregation Engine
+    # -------------------------------
     trend_groups = {}
 
     for item in raw_scraped_data:
-        # 1. Broad Category
-        category = get_ai_category(item["title"])
-        # 2. Descriptive Multi-word Tag
-        smart_tag = generate_smart_tag(item["title"])
-        
-        # Create a key to group similar topics (e.g., "west bengalelection" = "West Bengal Election")
-        group_key = smart_tag.lower().replace(" ", "")
-        
+        title = item["title"]
+
+        tag = generate_smart_tag(title)
+        group_key = tag.lower()
+
+        rec = recency_score(item["timestamp"])
+        ind = india_score(title)
+
+        score = 50 + (50 * rec) + (30 * ind)
+
         if group_key not in trend_groups:
             trend_groups[group_key] = {
-                "tag_name": smart_tag,
-                "description": item["title"][:100],
-                "category": category,
+                "tag_name": tag,
+                "description": title,
+                "category": classify(title),
                 "score": 0,
-                "sources_involved": set(),
+                "sources": set(),
                 "mentions": 0
             }
-        
+
+        trend_groups[group_key]["score"] += score
         trend_groups[group_key]["mentions"] += 1
-        trend_groups[group_key]["sources_involved"].add(item["source"])
-        trend_groups[group_key]["score"] += item["base_weight"]
+        trend_groups[group_key]["sources"].add(item["source"])
 
-    # --- 3. RANKING & CROSS-SOURCE VALIDATION ---
-    final_ranked_list = []
-    for key, data in trend_groups.items():
+    # -------------------------------
+    # 10. Ranking
+    # -------------------------------
+    final_output = []
+
+    for data in trend_groups.values():
         total_score = data["score"]
-        
-        # Multiplier: If found on >1 platform, it is a high-confidence trend
-        if len(data["sources_involved"]) > 1:
-            total_score *= 2.0
-            data["description"] = f"Breaking on {', '.join(data['sources_involved'])}: {data['description']}"
 
-        final_ranked_list.append({
-            "tag_name": data["tag_name"],
-            "description": data["description"],
+        # cross-platform boost
+        total_score *= (1 + 0.5 * len(data["sources"]))
+
+        final_output.append({
+            "tag_name": to_hindi(data["tag_name"]),
+            "description": to_hindi(data["description"]),
             "category": data["category"],
             "heat_score": int(total_score),
-            "source": "Multiple" if len(data["sources_involved"]) > 1 else list(data["sources_involved"])[0]
+            "source": "Multiple" if len(data["sources"]) > 1 else list(data["sources"])[0]
         })
 
-    # Take the top 10 trends to ensure only the highest quality items are displayed
-    top_output = sorted(final_ranked_list, key=lambda x: x["heat_score"], reverse=True)[:10]
+    top_output = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)[:10]
 
-    # --- 4. STORAGE ---
+    # -------------------------------
+    # 11. Store in Supabase
+    # -------------------------------
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
         supabase.table("trending_tags").insert(top_output).execute()
-        return {"status": "success", "count": len(top_output)}
+        return {"status": "success", "count": len(top_output), "data": top_output}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
+# -------------------------------
+# 12. Fetch Trends
+# -------------------------------
 @app.get("/get_trends")
 def get_trends():
-    if not supabase: return []
+    if not supabase:
+        return []
+
     res = supabase.table("trending_tags").select("*").order("heat_score", desc=True).execute()
     return res.data
