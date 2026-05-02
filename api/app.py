@@ -36,7 +36,7 @@ def update_trends():
             "source": "Google News"
         })
     # --- SOURCE 2: X / TWITTER TRENDS (via Trends24 RSS) ---
-    x_url = "https://trends24.in/india/feed/"
+    x_url = "https://trends24.in/india/"
     x_feed = feedparser.parse(x_url)
     for entry in x_feed.entries[:5]:
         all_trends.append({
