@@ -20,7 +20,6 @@ HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
 HF_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
 
 def get_ai_category(title):
-    """Classifies the headline into a theme."""
     if not HF_TOKEN: return "General"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     candidate_labels = ["Politics", "Technology", "Entertainment", "Sports", "Finance", "Bizarre", "Health"]
@@ -31,21 +30,16 @@ def get_ai_category(title):
     except: return "News"
 
 def get_dynamic_consensus_tag(target_title, all_titles, ai_category):
-    """Picks the keyword that best maps to the identified AI category."""
     def tokenize(text):
-        # Stopwords filter out filler words like 'सबकों', 'here's', 'gaya'
         stop_words = {"जानिए", "क्यों", "नहीं", "लिए", "बड़ी", "आज", "कैसे", "with", "from", "that", "here", "gaya", "सबकों"}
-        # Clean punctuation to avoid tags like '#तेज़,'
         clean_text = text.replace("?", "").replace("-", " ").replace("|", "").replace(",", "").replace("!", "")
         words = clean_text.lower().split()
         return [w for w in words if len(w) > 3 and w not in stop_words]
 
     corpus = [tokenize(t) for t in all_titles]
     target_tokens = tokenize(target_title)
-    
     if not target_tokens: return "#BharatPulse"
 
-    # Stage 1: TF-IDF to find statistically 'unique' candidates
     num_docs = len(all_titles)
     scores = {}
     for word in set(target_tokens):
@@ -54,11 +48,8 @@ def get_dynamic_consensus_tag(target_title, all_titles, ai_category):
         idf = math.log(num_docs / (1 + containing_docs))
         scores[word] = tf * idf
 
-    # Get top 3 candidates by statistical weight
     top_candidates = [k for k, v in sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]]
 
-    # Stage 2: Semantic Alignment (The Consensus Pass)
-    # We ask the AI which of these 3 unique words best fits the Category
     if HF_TOKEN and len(top_candidates) > 1:
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
         payload = {
@@ -80,47 +71,80 @@ def root():
 @app.get("/update_trends")
 def update_trends():
     if not supabase: return {"error": "Supabase missing"}
-    raw_entries = []
+    
+    # --- 1. COLLECT RAW DATA ---
+    raw_scraped_data = []
 
-    # --- SOURCE 1: GOOGLE NEWS ---
+    # Google News
     google_feed = feedparser.parse("https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi")
-    for entry in google_feed.entries[:8]:
-        raw_entries.append({"title": entry.title, "source": "Google News", "score": 95})
+    for entry in google_feed.entries[:15]: # Increased limit for better correlation
+        raw_scraped_data.append({"title": entry.title, "source": "Google News", "base_weight": 95})
 
-    # --- SOURCE 2: X / TWITTER ---
+    # X / Twitter
     try:
         req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as res:
             x_feed = feedparser.parse(res.read())
-        for entry in x_feed.entries[:5]:
-            raw_entries.append({"title": entry.title, "source": "Twitter/X", "score": 90})
+        for entry in x_feed.entries[:10]:
+            raw_scraped_data.append({"title": entry.title, "source": "Twitter/X", "base_weight": 90})
     except: pass
 
-    # --- SOURCE 3: REDDIT ---
+    # Reddit
     reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
-    for entry in reddit_feed.entries[:5]:
-        raw_entries.append({"title": entry.title, "source": "Reddit", "score": 80})
+    for entry in reddit_feed.entries[:10]:
+        raw_scraped_data.append({"title": entry.title, "source": "Reddit", "base_weight": 80})
 
-    # --- PROCESSING ---
-    all_titles = [item["title"] for item in raw_entries]
-    final_trends = []
+    # --- 2. THE AGGREGATION & CORRELATION ENGINE ---
+    all_titles = [item["title"] for item in raw_scraped_data]
+    trend_groups = {} # Dictionary to group by Smart Tag
 
-    for item in raw_entries:
+    for item in raw_scraped_data:
         cat = get_ai_category(item["title"])
         tag = get_dynamic_consensus_tag(item["title"], all_titles, cat)
-        final_trends.append({
-            "tag_name": tag,
-            "description": item["title"][:100],
-            "category": cat,
-            "heat_score": item["score"],
-            "source": item["source"]
+        
+        if tag not in trend_groups:
+            trend_groups[tag] = {
+                "tag_name": tag,
+                "description": item["title"][:100],
+                "category": cat,
+                "score_accumulator": 0,
+                "sources_involved": set(),
+                "mentions": 0
+            }
+        
+        # Calculate individual mention weight
+        trend_groups[tag]["mentions"] += 1
+        trend_groups[tag]["sources_involved"].add(item["source"])
+        # Each mention adds (Base Weight + 10 points frequency bonus)
+        trend_groups[tag]["score_accumulator"] += (item["base_weight"] + 10)
+
+    # --- 3. THE TREND FILTER & RANKER ---
+    final_ranked_list = []
+    for tag, data in trend_groups.items():
+        total_score = data["score_accumulator"]
+        
+        # PARAMETER: Cross-Platform Multiplier
+        # If a topic is found on >1 platform, boost the score by 1.5x
+        if len(data["sources_involved"]) > 1:
+            total_score *= 1.5
+            data["description"] = f"Viral across {', '.join(data['sources_involved'])}: {data['description']}"
+
+        final_ranked_list.append({
+            "tag_name": data["tag_name"],
+            "description": data["description"],
+            "category": data["category"],
+            "heat_score": int(total_score),
+            "source": "Multiple" if len(data["sources_involved"]) > 1 else list(data["sources_involved"])[0]
         })
 
-    # --- STORAGE ---
+    # SORT and LIMIT: Take only the Top 10 trends to filter out noise
+    top_trends = sorted(final_ranked_list, key=lambda x: x["heat_score"], reverse=True)[:10]
+
+    # --- 4. STORAGE ---
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
-        supabase.table("trending_tags").insert(final_trends).execute()
-        return {"status": "success", "count": len(final_trends)}
+        supabase.table("trending_tags").insert(top_trends).execute()
+        return {"status": "success", "unique_trends_saved": len(top_trends)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
