@@ -43,18 +43,16 @@ def generate_smart_tag(title):
 
     return " ".join([w.capitalize() for w in tag_words])
 
-
 # -------------------------------
-# 5. Similarity (Jaccard)
+# 5. Similarity
 # -------------------------------
 def similarity(tag1, tag2):
     set1 = set(tag1.lower().split())
     set2 = set(tag2.lower().split())
     return len(set1 & set2) / len(set1 | set2) if set1 and set2 else 0
 
-
 # -------------------------------
-# 6. Match existing tag
+# 6. Match tags
 # -------------------------------
 def find_matching_tag(new_tag, existing_tags):
     best_match = None
@@ -68,19 +66,19 @@ def find_matching_tag(new_tag, existing_tags):
 
     return best_match if best_score >= 0.5 else new_tag
 
-
 # -------------------------------
 # 7. India relevance
 # -------------------------------
 INDIA_KEYWORDS = [
     "india","delhi","mumbai","bjp","modi","rbi","ipl",
-    "chennai","kolkata","bangalore","hyderabad"
+    "chennai","kolkata","bangalore","hyderabad",
+    "bollywood","cricket","election"
 ]
 
 def india_score(text):
     text = text.lower()
-    return 1 if any(word in text for word in INDIA_KEYWORDS) else 0
-
+    matches = sum(1 for word in INDIA_KEYWORDS if word in text)
+    return min(1, matches / 3)
 
 # -------------------------------
 # 8. Recency
@@ -89,7 +87,6 @@ def recency_score(ts):
     diff = (datetime.datetime.utcnow() - ts).total_seconds()
     return max(0, 1 - diff / 43200)
 
-
 # -------------------------------
 # 9. Category
 # -------------------------------
@@ -97,14 +94,13 @@ def classify(text):
     text = text.lower()
     if "cricket" in text or "ipl" in text:
         return "Sports"
-    elif "movie" in text or "ott" in text:
+    elif "movie" in text or "ott" in text or "youtube" in text:
         return "Entertainment"
     elif "rbi" in text or "market" in text:
         return "Finance"
     elif "election" in text or "bjp" in text:
         return "Politics"
     return "General"
-
 
 # -------------------------------
 # 10. Hindi translation
@@ -118,14 +114,12 @@ def to_hindi(text):
     except:
         return text
 
-
 # -------------------------------
 # 11. Root
 # -------------------------------
 @app.get("/")
 def root():
     return {"message": "Trend Engine Active", "supabase": supabase is not None}
-
 
 # -------------------------------
 # 12. Update Trends
@@ -137,13 +131,18 @@ def update_trends():
 
     raw_scraped_data = []
 
-    # Google News
+    # -------- Google News --------
     google_feed = feedparser.parse("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en")
     for entry in google_feed.entries[:10]:
         ts = datetime.datetime(*entry.published_parsed[:6]) if "published_parsed" in entry else datetime.datetime.utcnow()
         raw_scraped_data.append({"title": entry.title, "source": "Google News", "timestamp": ts})
 
-    # Twitter
+    # -------- Reddit --------
+    reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
+    for entry in reddit_feed.entries[:10]:
+        raw_scraped_data.append({"title": entry.title, "source": "Reddit", "timestamp": datetime.datetime.utcnow()})
+
+    # -------- Twitter --------
     try:
         req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as res:
@@ -153,10 +152,23 @@ def update_trends():
     except:
         pass
 
-    # Reddit
-    reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
-    for entry in reddit_feed.entries[:10]:
-        raw_scraped_data.append({"title": entry.title, "source": "Reddit", "timestamp": datetime.datetime.utcnow()})
+    # -------- Google Trends --------
+    trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
+    for entry in trends_feed.entries[:10]:
+        raw_scraped_data.append({
+            "title": entry.title,
+            "source": "Google Trends",
+            "timestamp": datetime.datetime.utcnow()
+        })
+
+    # -------- YouTube Trending --------
+    yt_feed = feedparser.parse("https://www.youtube.com/feeds/videos.xml?chart=mostPopular&regionCode=IN")
+    for entry in yt_feed.entries[:10]:
+        raw_scraped_data.append({
+            "title": entry.title,
+            "source": "YouTube",
+            "timestamp": datetime.datetime.utcnow()
+        })
 
     # -------------------------------
     # Aggregation
@@ -199,7 +211,7 @@ def update_trends():
         # Cross-platform boost
         total_score *= (1 + 0.5 * len(data["sources"]))
 
-        # 🔥 NEW: Mention boost
+        # Mention boost
         total_score *= (1 + 0.3 * data["mentions"])
 
         final_output.append({
@@ -221,7 +233,6 @@ def update_trends():
         return {"status": "success", "data": top_output}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
 
 # -------------------------------
 # 13. Get Trends
