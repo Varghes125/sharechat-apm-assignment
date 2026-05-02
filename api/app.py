@@ -57,6 +57,13 @@ def classify(text):
     return "General"
 
 # -------------------------------
+# Recency Score
+# -------------------------------
+def recency_score(ts):
+    diff = (datetime.datetime.utcnow() - ts).total_seconds()
+    return max(0, 1 - diff / 43200)  # 12 hr decay
+
+# -------------------------------
 # Root
 # -------------------------------
 @app.get("/")
@@ -91,16 +98,17 @@ def update_trends():
             "timestamp": datetime.datetime.utcnow()
         })
 
-    # -------- Google Trends --------
+    # -------- Google Trends (IMPORTANT) --------
     trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
-    for entry in trends_feed.entries[:5]:
+    for i, entry in enumerate(trends_feed.entries[:5]):
         raw_data.append({
             "title": entry.title,
             "source": "Google Trends",
-            "timestamp": datetime.datetime.utcnow()
+            "timestamp": datetime.datetime.utcnow(),
+            "rank": i + 1  # lower = more popular
         })
 
-    # -------- YouTube (fixed) --------
+    # -------- YouTube --------
     yt_feed = feedparser.parse(
         "https://www.youtube.com/feeds/videos.xml?search_query=trending+india"
     )
@@ -112,32 +120,77 @@ def update_trends():
         })
 
     # -------------------------------
-    # Transform (NO SCORING)
+    # Aggregation
+    # -------------------------------
+    trend_map = {}
+
+    for item in raw_data:
+        tag = generate_smart_tag(item["title"])
+        rec = recency_score(item["timestamp"])
+
+        # -------------------------
+        # SEARCH VOLUME SCORE
+        # -------------------------
+        if item["source"] == "Google Trends":
+            volume_score = (6 - item["rank"]) * 20  # rank1=100, rank5=20
+        else:
+            volume_score = 30  # base for other sources
+
+        # -------------------------
+        # RECENCY SCORE
+        # -------------------------
+        rec_score = rec * 50
+
+        # -------------------------
+        # INIT
+        # -------------------------
+        if tag not in trend_map:
+            trend_map[tag] = {
+                "tag_name": tag,
+                "description": item["title"],
+                "category": classify(item["title"]),
+                "score": 0,
+                "mentions": 0
+            }
+
+        trend_map[tag]["score"] += (volume_score + rec_score)
+        trend_map[tag]["mentions"] += 1
+
+    # -------------------------------
+    # SPIKE DETECTION
     # -------------------------------
     final_output = []
 
-    for item in raw_data:
-        title = item["title"]
-        tag = generate_smart_tag(title)
+    for data in trend_map.values():
+        total_score = data["score"]
+
+        # spike bonus
+        if data["mentions"] >= 3:
+            total_score *= 1.5
+        elif data["mentions"] == 2:
+            total_score *= 1.2
 
         final_output.append({
-            "tag_name": tag,
-            "description": title,
-            "category": classify(title),
-            "source": item["source"],
-            "created_at": datetime.datetime.utcnow().isoformat()
+            "tag_name": data["tag_name"],
+            "description": data["description"],
+            "category": data["category"],
+            "heat_score": int(total_score),
+            "mentions": data["mentions"]
         })
+
+    # sort
+    final_sorted = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)
 
     # -------------------------------
     # Store
     # -------------------------------
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
-        supabase.table("trending_tags").insert(final_output).execute()
+        supabase.table("trending_tags").insert(final_sorted).execute()
 
         return {
             "status": "success",
-            "total_inserted": len(final_output)
+            "top_10": final_sorted[:10]
         }
 
     except Exception as e:
@@ -151,5 +204,5 @@ def get_trends():
     if not supabase:
         return []
 
-    res = supabase.table("trending_tags").select("*").execute()
+    res = supabase.table("trending_tags").select("*").order("heat_score", desc=True).execute()
     return res.data
