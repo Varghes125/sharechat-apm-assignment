@@ -5,8 +5,6 @@ import os
 import re
 import datetime
 import urllib.request
-import urllib.parse
-import json
 
 app = FastAPI()
 
@@ -59,18 +57,6 @@ def classify(text):
     return "General"
 
 # -------------------------------
-# Hindi translation
-# -------------------------------
-def to_hindi(text):
-    try:
-        url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=hi&dt=t&q=" + urllib.parse.quote(text)
-        response = urllib.request.urlopen(url)
-        result = json.loads(response.read())
-        return result[0][0][0]
-    except:
-        return text
-
-# -------------------------------
 # Root
 # -------------------------------
 @app.get("/")
@@ -78,7 +64,7 @@ def root():
     return {"message": "Trend Engine Active", "supabase": supabase is not None}
 
 # -------------------------------
-# Update Trends (RAW MODE)
+# Update Trends
 # -------------------------------
 @app.get("/update_trends")
 def update_trends():
@@ -105,20 +91,6 @@ def update_trends():
             "timestamp": datetime.datetime.utcnow()
         })
 
-    # -------- Twitter --------
-    try:
-        req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as res:
-            x_feed = feedparser.parse(res.read())
-        for entry in x_feed.entries[:5]:
-            raw_data.append({
-                "title": entry.title,
-                "source": "Twitter/X",
-                "timestamp": datetime.datetime.utcnow()
-            })
-    except:
-        pass
-
     # -------- Google Trends --------
     trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
     for entry in trends_feed.entries[:5]:
@@ -128,8 +100,10 @@ def update_trends():
             "timestamp": datetime.datetime.utcnow()
         })
 
-    # -------- YouTube --------
-    yt_feed = feedparser.parse("https://www.youtube.com/feeds/videos.xml?chart=mostPopular&regionCode=IN")
+    # -------- YouTube (fixed) --------
+    yt_feed = feedparser.parse(
+        "https://www.youtube.com/feeds/videos.xml?search_query=trending+india"
+    )
     for entry in yt_feed.entries[:5]:
         raw_data.append({
             "title": entry.title,
@@ -144,30 +118,21 @@ def update_trends():
 
     for item in raw_data:
         title = item["title"]
-
         tag = generate_smart_tag(title)
 
         final_output.append({
-            "tag_name": to_hindi(tag),
-            "description": to_hindi(title),
+            "tag_name": tag,
+            "description": title,
             "category": classify(title),
-
-            # -------------------------
-            # SCORING DISABLED
-            # -------------------------
-            # "heat_score": score,
-
             "source": item["source"],
             "created_at": datetime.datetime.utcnow().isoformat()
         })
 
     # -------------------------------
-    # Store EVERYTHING
+    # Store
     # -------------------------------
     try:
-        # Optional: comment this if you want history
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
-
         supabase.table("trending_tags").insert(final_output).execute()
 
         return {
