@@ -1,15 +1,15 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/update_trends",
-      "destination": "/api/index.py"
-    }
-  ],
-  "crons": [
-    {
-      "path": "/api/update_trends",
-      "schedule": "0 0 * * *"
+      "destination": "api/index.py"
     }
   ]
 }
