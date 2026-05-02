@@ -2,3 +2,5 @@ fastapi
 uvicorn
 supabase
 feedparser
+beautifulsoup4
+requests
