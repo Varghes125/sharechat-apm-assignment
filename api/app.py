@@ -67,28 +67,14 @@ def find_matching_tag(new_tag, existing_tags):
     return best_match if best_score >= 0.5 else new_tag
 
 # -------------------------------
-# 7. India relevance
-# -------------------------------
-INDIA_KEYWORDS = [
-    "india","delhi","mumbai","bjp","modi","rbi","ipl",
-    "chennai","kolkata","bangalore","hyderabad",
-    "bollywood","cricket","election"
-]
-
-def india_score(text):
-    text = text.lower()
-    matches = sum(1 for word in INDIA_KEYWORDS if word in text)
-    return min(1, matches / 3)
-
-# -------------------------------
-# 8. Recency
+# 7. Recency
 # -------------------------------
 def recency_score(ts):
     diff = (datetime.datetime.utcnow() - ts).total_seconds()
     return max(0, 1 - diff / 43200)
 
 # -------------------------------
-# 9. Category
+# 8. Category
 # -------------------------------
 def classify(text):
     text = text.lower()
@@ -103,7 +89,7 @@ def classify(text):
     return "General"
 
 # -------------------------------
-# 10. Hindi translation
+# 9. Hindi translation
 # -------------------------------
 def to_hindi(text):
     try:
@@ -115,14 +101,14 @@ def to_hindi(text):
         return text
 
 # -------------------------------
-# 11. Root
+# 10. Root
 # -------------------------------
 @app.get("/")
 def root():
     return {"message": "Trend Engine Active", "supabase": supabase is not None}
 
 # -------------------------------
-# 12. Update Trends
+# 11. Update Trends
 # -------------------------------
 @app.get("/update_trends")
 def update_trends():
@@ -182,9 +168,8 @@ def update_trends():
         matched_tag = find_matching_tag(new_tag, trend_groups.keys())
 
         rec = recency_score(item["timestamp"])
-        ind = india_score(title)
 
-        score = 50 + (50 * rec) + (30 * ind)
+        score = 50 + (50 * rec)
 
         if matched_tag not in trend_groups:
             trend_groups[matched_tag] = {
@@ -222,20 +207,20 @@ def update_trends():
             "source": "Multiple" if len(data["sources"]) > 1 else list(data["sources"])[0]
         })
 
-    top_output = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)[:20]
+    all_sorted = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)
 
     # -------------------------------
-    # Store
+    # Store ALL trends
     # -------------------------------
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
-        supabase.table("trending_tags").insert(top_output).execute()
-        return {"status": "success", "data": top_output}
+        supabase.table("trending_tags").insert(all_sorted).execute()
+        return {"status": "success", "top_10": all_sorted[:10]}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 # -------------------------------
-# 13. Get Trends
+# 12. Get Trends
 # -------------------------------
 @app.get("/get_trends")
 def get_trends():
