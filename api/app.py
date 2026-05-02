@@ -4,9 +4,10 @@ app = FastAPI()
 
 @app.get("/")
 def root():
+    print("🔥 Root hit")
     return {"message": "API working"}
 
 @app.get("/update_trends")
 def update_trends():
-    print("🔥 Function executed")
+    print("🔥 Trends endpoint hit")
     return {"status": "success"}
