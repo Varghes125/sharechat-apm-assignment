@@ -18,25 +18,59 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
 # -------------------------------
-# 2. Utility: Tag Generator (FREE)
+# 2. STOPWORDS
 # -------------------------------
 STOPWORDS = set([
     "the","is","at","which","on","and","a","an","in","to","for","of","with","by",
     "from","that","this","it","as","are","was","were"
 ])
 
+# -------------------------------
+# 3. Normalize words
+# -------------------------------
+def normalize(word):
+    return word[:-1] if word.endswith("s") else word
+
+# -------------------------------
+# 4. Tag Generator
+# -------------------------------
 def generate_smart_tag(title):
     title = title.lower()
     title = re.sub(r'[^a-zA-Z0-9\s]', '', title)
 
-    words = [w for w in title.split() if w not in STOPWORDS]
-
+    words = [normalize(w) for w in title.split() if w not in STOPWORDS]
     tag_words = words[:3] if len(words) >= 3 else words
-    return "#" + "".join([w.capitalize() for w in tag_words])
+
+    return " ".join([w.capitalize() for w in tag_words])
 
 
 # -------------------------------
-# 3. India Relevance Score
+# 5. Similarity (Jaccard)
+# -------------------------------
+def similarity(tag1, tag2):
+    set1 = set(tag1.lower().split())
+    set2 = set(tag2.lower().split())
+    return len(set1 & set2) / len(set1 | set2) if set1 and set2 else 0
+
+
+# -------------------------------
+# 6. Match existing tag
+# -------------------------------
+def find_matching_tag(new_tag, existing_tags):
+    best_match = None
+    best_score = 0
+
+    for tag in existing_tags:
+        score = similarity(new_tag, tag)
+        if score > best_score:
+            best_score = score
+            best_match = tag
+
+    return best_match if best_score >= 0.5 else new_tag
+
+
+# -------------------------------
+# 7. India relevance
 # -------------------------------
 INDIA_KEYWORDS = [
     "india","delhi","mumbai","bjp","modi","rbi","ipl",
@@ -49,31 +83,31 @@ def india_score(text):
 
 
 # -------------------------------
-# 4. Recency Score
+# 8. Recency
 # -------------------------------
 def recency_score(ts):
     diff = (datetime.datetime.utcnow() - ts).total_seconds()
-    return max(0, 1 - diff / 43200)  # 12 hour decay
+    return max(0, 1 - diff / 43200)
 
 
 # -------------------------------
-# 5. Simple Category Classifier
+# 9. Category
 # -------------------------------
 def classify(text):
     text = text.lower()
     if "cricket" in text or "ipl" in text:
         return "Sports"
-    elif "movie" in text or "ott" in text or "film" in text:
+    elif "movie" in text or "ott" in text:
         return "Entertainment"
-    elif "rbi" in text or "stock" in text or "market" in text:
+    elif "rbi" in text or "market" in text:
         return "Finance"
-    elif "election" in text or "bjp" in text or "government" in text:
+    elif "election" in text or "bjp" in text:
         return "Politics"
     return "General"
 
 
 # -------------------------------
-# 6. Free Hindi Translation
+# 10. Hindi translation
 # -------------------------------
 def to_hindi(text):
     try:
@@ -86,18 +120,15 @@ def to_hindi(text):
 
 
 # -------------------------------
-# 7. Root API
+# 11. Root
 # -------------------------------
 @app.get("/")
 def root():
-    return {
-        "message": "ShareChat Trend Engine Active",
-        "supabase_connected": supabase is not None
-    }
+    return {"message": "Trend Engine Active", "supabase": supabase is not None}
 
 
 # -------------------------------
-# 8. Main Trend Engine
+# 12. Update Trends
 # -------------------------------
 @app.get("/update_trends")
 def update_trends():
@@ -106,58 +137,46 @@ def update_trends():
 
     raw_scraped_data = []
 
-    # -------- Google News --------
+    # Google News
     google_feed = feedparser.parse("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en")
     for entry in google_feed.entries[:10]:
         ts = datetime.datetime(*entry.published_parsed[:6]) if "published_parsed" in entry else datetime.datetime.utcnow()
-        raw_scraped_data.append({
-            "title": entry.title,
-            "source": "Google News",
-            "timestamp": ts
-        })
+        raw_scraped_data.append({"title": entry.title, "source": "Google News", "timestamp": ts})
 
-    # -------- Twitter (via Trends24) --------
+    # Twitter
     try:
         req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as res:
             x_feed = feedparser.parse(res.read())
         for entry in x_feed.entries[:10]:
-            raw_scraped_data.append({
-                "title": entry.title,
-                "source": "Twitter/X",
-                "timestamp": datetime.datetime.utcnow()
-            })
+            raw_scraped_data.append({"title": entry.title, "source": "Twitter/X", "timestamp": datetime.datetime.utcnow()})
     except:
         pass
 
-    # -------- Reddit --------
+    # Reddit
     reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
     for entry in reddit_feed.entries[:10]:
-        raw_scraped_data.append({
-            "title": entry.title,
-            "source": "Reddit",
-            "timestamp": datetime.datetime.utcnow()
-        })
+        raw_scraped_data.append({"title": entry.title, "source": "Reddit", "timestamp": datetime.datetime.utcnow()})
 
     # -------------------------------
-    # 9. Aggregation Engine
+    # Aggregation
     # -------------------------------
     trend_groups = {}
 
     for item in raw_scraped_data:
         title = item["title"]
 
-        tag = generate_smart_tag(title)
-        group_key = tag.lower()
+        new_tag = generate_smart_tag(title)
+        matched_tag = find_matching_tag(new_tag, trend_groups.keys())
 
         rec = recency_score(item["timestamp"])
         ind = india_score(title)
 
         score = 50 + (50 * rec) + (30 * ind)
 
-        if group_key not in trend_groups:
-            trend_groups[group_key] = {
-                "tag_name": tag,
+        if matched_tag not in trend_groups:
+            trend_groups[matched_tag] = {
+                "tag_name": matched_tag,
                 "description": title,
                 "category": classify(title),
                 "score": 0,
@@ -165,20 +184,23 @@ def update_trends():
                 "mentions": 0
             }
 
-        trend_groups[group_key]["score"] += score
-        trend_groups[group_key]["mentions"] += 1
-        trend_groups[group_key]["sources"].add(item["source"])
+        trend_groups[matched_tag]["score"] += score
+        trend_groups[matched_tag]["mentions"] += 1
+        trend_groups[matched_tag]["sources"].add(item["source"])
 
     # -------------------------------
-    # 10. Ranking
+    # Ranking
     # -------------------------------
     final_output = []
 
     for data in trend_groups.values():
         total_score = data["score"]
 
-        # cross-platform boost
+        # Cross-platform boost
         total_score *= (1 + 0.5 * len(data["sources"]))
+
+        # 🔥 NEW: Mention boost
+        total_score *= (1 + 0.3 * data["mentions"])
 
         final_output.append({
             "tag_name": to_hindi(data["tag_name"]),
@@ -191,18 +213,18 @@ def update_trends():
     top_output = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)[:10]
 
     # -------------------------------
-    # 11. Store in Supabase
+    # Store
     # -------------------------------
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
         supabase.table("trending_tags").insert(top_output).execute()
-        return {"status": "success", "count": len(top_output), "data": top_output}
+        return {"status": "success", "data": top_output}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 
 # -------------------------------
-# 12. Fetch Trends
+# 13. Get Trends
 # -------------------------------
 @app.get("/get_trends")
 def get_trends():
