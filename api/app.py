@@ -1,13 +1,78 @@
 from fastapi import FastAPI
+from supabase import create_client
+import feedparser
+import os
+import json
 
 app = FastAPI()
 
+# 1. Initialize Supabase
+# Ensure these are set in your Vercel Environment Variables
+url = os.environ.get("SUPABASE_URL")
+key = os.environ.get("SUPABASE_KEY")
+supabase = create_client(url, key) if url and key else None
+
 @app.get("/")
 def root():
-    print("🔥 ROOT HIT")
-    return {"message": "API working"}
+    return {"message": "ShareChat Trend Engine Active", "supabase_connected": supabase is not None}
 
 @app.get("/update_trends")
 def update_trends():
-    print("🔥 TRENDS HIT")
-    return {"status": "success"}
+    if not supabase:
+        return {"error": "Supabase credentials not configured"}
+
+    all_trends = []
+
+    # --- SOURCE 1: GOOGLE NEWS (Hindi/India focus) ---
+    # Parameters: hl=hi (Hindi), gl=IN (India), ceid=IN:hi
+    google_url = "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi"
+    google_feed = feedparser.parse(google_url)
+    for entry in google_feed.entries[:5]:
+        all_trends.append({
+            "tag_name": f"#{entry.title.split()[0]}",
+            "description": entry.title[:100],
+            "category": "News",
+            "heat_score": 95.0, # High base score for News
+            "source": "Google News"
+        })
+
+    # --- SOURCE 2: X / TWITTER TRENDS (via Trends24 RSS) ---
+    x_url = "https://trends24.in/india/feed/"
+    x_feed = feedparser.parse(x_url)
+    for entry in x_feed.entries[:5]:
+        all_trends.append({
+            "tag_name": entry.title, # Trends24 provides hashtags directly
+            "description": "Viral topic on X (India)",
+            "category": "Social",
+            "heat_score": 90.0,
+            "source": "Twitter/X"
+        })
+
+    # --- SOURCE 3: REDDIT (r/India Hot) ---
+    reddit_url = "https://www.reddit.com/r/india/hot/.rss"
+    # Note: User-Agent is sometimes required for Reddit RSS
+    reddit_feed = feedparser.parse(reddit_url)
+    for entry in reddit_feed.entries[:3]:
+        all_trends.append({
+            "tag_name": f"#{entry.title.split()[-1][:12]}",
+            "description": entry.title[:100],
+            "category": "Community",
+            "heat_score": 80.0,
+            "source": "Reddit"
+        })
+
+    try:
+        # Step 2: Clear old trends to maintain "Freshness"
+        # This deletes entries that aren't the 'id 0' placeholder if you have one
+        supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
+
+        # Step 3: Insert fresh ranked trends
+        result = supabase.table("trending_tags").insert(all_trends).execute()
+        
+        return {
+            "status": "success",
+            "new_trends_count": len(all_trends),
+            "sources_synced": ["Google News", "X", "Reddit"]
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
