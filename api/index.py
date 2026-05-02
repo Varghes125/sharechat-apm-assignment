@@ -1,6 +1,6 @@
 import json
-def handler(request):
+def handler(request, context):
     return {
-        'statusCode': 200,
-        'body': json.dumps({"status": "Vercel found the handler!"})
+        "statusCode": 200,
+        "body": "Working"
     }
