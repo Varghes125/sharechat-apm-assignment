@@ -32,19 +32,18 @@ def update_trends():
             "tag_name": f"#{entry.title.split()[0]}",
             "description": entry.title[:100],
             "category": "News",
-            "heat_score": 95.0, # High base score for News
+            "heat_score": 95,  # Changed 95.0 to 95
             "source": "Google News"
         })
-
     # --- SOURCE 2: X / TWITTER TRENDS (via Trends24 RSS) ---
     x_url = "https://trends24.in/india/feed/"
     x_feed = feedparser.parse(x_url)
     for entry in x_feed.entries[:5]:
         all_trends.append({
-            "tag_name": entry.title, # Trends24 provides hashtags directly
+            "tag_name": entry.title,
             "description": "Viral topic on X (India)",
             "category": "Social",
-            "heat_score": 90.0,
+            "heat_score": 90,  # Changed 90.0 to 90
             "source": "Twitter/X"
         })
 
@@ -57,7 +56,7 @@ def update_trends():
             "tag_name": f"#{entry.title.split()[-1][:12]}",
             "description": entry.title[:100],
             "category": "Community",
-            "heat_score": 80.0,
+            "heat_score": 80,  # Changed 80.0 to 80
             "source": "Reddit"
         })
 
