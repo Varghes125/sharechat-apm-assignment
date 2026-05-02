@@ -1,5 +1,4 @@
 import json
-
 def handler(request):
     return {
         'statusCode': 200,
