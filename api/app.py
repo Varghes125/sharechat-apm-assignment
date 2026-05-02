@@ -5,7 +5,7 @@ import os
 import json
 import math
 import urllib.request
-import requests  # Added for Hugging Face API
+import requests
 from collections import Counter
 
 app = FastAPI()
@@ -25,7 +25,6 @@ def get_ai_category(title):
         return "General"
     
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    # Define themes relevant to the ShareChat "Bharat" audience
     candidate_labels = ["Politics", "Technology", "Entertainment", "Sports", "Finance", "Bizarre", "Health"]
     
     payload = {
@@ -34,17 +33,16 @@ def get_ai_category(title):
     }
     
     try:
-        # Standard Hugging Face Inference API call
         response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=5)
         result = response.json()
-        # Return the top predicted label
         return result['labels'][0]
     except Exception as e:
         print(f"AI Classification failed: {e}")
         return "News"
 
-def get_tfidf_tag(target_title, all_titles):
-    """Extracts the most statistically significant word from a title."""
+def get_dynamic_consensus_tag(target_title, all_titles, ai_category):
+    """Extracts keywords via TF-IDF and uses AI to pick the one best matching the theme."""
+    
     def tokenize(text):
         stop_words = {"जानिए", "क्यों", "नहीं", "लिए", "बड़ी", "आज", "कैसे", "with", "from", "that"}
         words = text.replace("?", "").replace("-", " ").replace("|", "").lower().split()
@@ -56,18 +54,37 @@ def get_tfidf_tag(target_title, all_titles):
     if not target_tokens:
         return "#Trending"
 
+    # 1. Calculate TF-IDF scores to find candidates
     num_docs = len(all_titles)
     scores = {}
-
     for word in set(target_tokens):
         tf = target_tokens.count(word)
         containing_docs = sum(1 for doc in corpus if word in doc)
         idf = math.log(num_docs / (1 + containing_docs))
         scores[word] = tf * idf
 
-    if not scores: return "#BharatPulse"
-    
-    best_word = max(scores, key=scores.get)
+    # Get top 3 statistical candidates
+    sorted_candidates = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    top_candidates = [k[0] for k in sorted_candidates[:3]]
+
+    # 2. Dynamic Semantic Mapping
+    # Ask AI: Which of these candidates best represents the [ai_category]?
+    if HF_TOKEN and len(top_candidates) > 1:
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        payload = {
+            "inputs": f"The main subject of this {ai_category} news is:",
+            "parameters": {"candidate_labels": top_candidates}
+        }
+        try:
+            response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=5)
+            result = response.json()
+            best_word = result['labels'][0]
+            return f"#{best_word.capitalize()}"
+        except:
+            pass
+
+    # Fallback to highest TF-IDF word
+    best_word = top_candidates[0] if top_candidates else "BharatPulse"
     return f"#{best_word.capitalize()}"
 
 @app.get("/")
@@ -81,52 +98,49 @@ def update_trends():
 
     raw_entries = []
 
-    # --- SOURCE 1: GOOGLE NEWS ---
+    # --- INGESTION ---
     google_url = "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi"
     google_feed = feedparser.parse(google_url)
     for entry in google_feed.entries[:8]:
-        raw_entries.append({"title": entry.title, "source": "Google News", "base_cat": "News", "score": 95})
+        raw_entries.append({"title": entry.title, "source": "Google News", "score": 95})
 
-    # --- SOURCE 2: X / TWITTER ---
     x_url = "https://trends24.in/india/feed/"
     try:
         req = urllib.request.Request(x_url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
             x_feed = feedparser.parse(response.read())
         for entry in x_feed.entries[:5]:
-            raw_entries.append({"title": entry.title, "source": "Twitter/X", "base_cat": "Social", "score": 90})
+            raw_entries.append({"title": entry.title, "source": "Twitter/X", "score": 90})
     except: pass
 
-    # --- SOURCE 3: REDDIT ---
     reddit_url = "https://www.reddit.com/r/india/hot/.rss"
     reddit_feed = feedparser.parse(reddit_url)
     for entry in reddit_feed.entries[:5]:
-        raw_entries.append({"title": entry.title, "source": "Reddit", "base_cat": "Community", "score": 80})
+        raw_entries.append({"title": entry.title, "source": "Reddit", "score": 80})
 
-    # --- TF-IDF & AI PROCESSING ---
+    # --- PROCESSING ---
     all_titles = [item["title"] for item in raw_entries]
     final_trends = []
 
     for item in raw_entries:
-        # 1. Dynamic Tag Extraction (TF-IDF)
-        smart_tag = get_tfidf_tag(item["title"], all_titles)
-        
-        # 2. Intelligent Categorization (Zero-Shot AI)
-        # We pass the title to the AI to get a precise category
+        # 1. Identify the broad Theme
         ai_category = get_ai_category(item["title"])
+        
+        # 2. Extract the Tag that best fits that Theme
+        smart_tag = get_dynamic_consensus_tag(item["title"], all_titles, ai_category)
         
         final_trends.append({
             "tag_name": smart_tag,
             "description": item["title"][:100],
-            "category": ai_category,  # Replaces the static base_cat with AI result
+            "category": ai_category,
             "heat_score": item["score"],
             "source": item["source"]
         })
 
+    # --- STORAGE ---
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
         supabase.table("trending_tags").insert(final_trends).execute()
-        
         return {"status": "success", "count": len(final_trends)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
