@@ -231,7 +231,7 @@ def update_trends():
             "description": data["description"],
             "category": data["category"],
             "heat_score": int(total_score),
-            "source": "Multiple" if len(data["sources"]) > 1 else list(data["sources"])[0]
+            "source": ", ".join(data["sources"])
             
         })
 
