@@ -232,6 +232,7 @@ def update_trends():
             "category": data["category"],
             "heat_score": int(total_score),
             "source": "Multiple" if len(data["sources"]) > 1 else list(data["sources"])[0]
+            
         })
 
     final_sorted = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)
