@@ -35,18 +35,35 @@ def update_trends():
             "heat_score": 95,  # Changed 95.0 to 95
             "source": "Google News"
         })
-    # --- SOURCE 2: X / TWITTER TRENDS (via Trends24 RSS) ---
-    x_url = "https://trends24.in/india/"
-    x_feed = feedparser.parse(x_url)
-    for entry in x_feed.entries[:5]:
-        all_trends.append({
-            "tag_name": entry.title,
-            "description": "Viral topic on X (India)",
-            "category": "Social",
-            "heat_score": 90,  # Changed 90.0 to 90
-            "source": "Twitter/X"
-        })
 
+    
+   # --- SOURCE 2: X / TWITTER TRENDS (Improved) ---
+    import urllib.request
+    
+    x_url = "https://trends24.in/india/"
+    try:
+        # We add a User-Agent header to mimic a Chrome browser
+        req = urllib.request.Request(x_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            x_html = response.read()
+            x_feed = feedparser.parse(x_html)
+            
+        for entry in x_feed.entries[:5]:
+            all_trends.append({
+                "tag_name": entry.title,
+                "description": "Viral topic on X (India)",
+                "category": "Social",
+                "heat_score": 90,
+                "source": "Twitter/X"
+            })
+    except Exception as x_error:
+        print(f"X Scraping failed: {x_error}")
+        # We don't crash the whole app, just log that X failed
+
+
+
+
+    
     # --- SOURCE 3: REDDIT (r/India Hot) ---
     reddit_url = "https://www.reddit.com/r/india/hot/.rss"
     # Note: User-Agent is sometimes required for Reddit RSS
