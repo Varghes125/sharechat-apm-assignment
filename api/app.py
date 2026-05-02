@@ -5,6 +5,8 @@ import os
 import re
 import datetime
 import urllib.request
+import requests
+from bs4 import BeautifulSoup
 
 app = FastAPI()
 
@@ -42,6 +44,29 @@ def generate_smart_tag(title):
     return " ".join([w.capitalize() for w in tag_words])
 
 # -------------------------------
+# Similarity
+# -------------------------------
+def similarity(tag1, tag2):
+    set1 = set(tag1.lower().split())
+    set2 = set(tag2.lower().split())
+    return len(set1 & set2) / len(set1 | set2) if set1 and set2 else 0
+
+# -------------------------------
+# Tag Matching
+# -------------------------------
+def find_matching_tag(new_tag, existing_tags):
+    best_match = None
+    best_score = 0
+
+    for tag in existing_tags:
+        score = similarity(new_tag, tag)
+        if score > best_score:
+            best_score = score
+            best_match = tag
+
+    return best_match if best_score >= 0.5 else new_tag
+
+# -------------------------------
 # Category
 # -------------------------------
 def classify(text):
@@ -61,7 +86,32 @@ def classify(text):
 # -------------------------------
 def recency_score(ts):
     diff = (datetime.datetime.utcnow() - ts).total_seconds()
-    return max(0, 1 - diff / 43200)  # 12 hr decay
+    return max(0, 1 - diff / 43200)  # 12 hrs decay
+
+# -------------------------------
+# Twitter Trends Scraper
+# -------------------------------
+def fetch_twitter_trends():
+    trends = []
+    try:
+        url = "https://trends24.in/india/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        response = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        trend_lists = soup.find_all("ol")
+
+        for ol in trend_lists[:1]:
+            for li in ol.find_all("li")[:10]:
+                trend = li.text.strip()
+                if trend:
+                    trends.append(trend)
+
+    except Exception as e:
+        print("Twitter scrape failed:", e)
+
+    return trends
 
 # -------------------------------
 # Root
@@ -83,10 +133,11 @@ def update_trends():
     # -------- Google News --------
     google_feed = feedparser.parse("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en")
     for entry in google_feed.entries[:5]:
+        ts = datetime.datetime(*entry.published_parsed[:6]) if "published_parsed" in entry else datetime.datetime.utcnow()
         raw_data.append({
             "title": entry.title,
             "source": "Google News",
-            "timestamp": datetime.datetime.utcnow()
+            "timestamp": ts
         })
 
     # -------- Reddit --------
@@ -98,14 +149,14 @@ def update_trends():
             "timestamp": datetime.datetime.utcnow()
         })
 
-    # -------- Google Trends (IMPORTANT) --------
+    # -------- Google Trends --------
     trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
     for i, entry in enumerate(trends_feed.entries[:5]):
         raw_data.append({
             "title": entry.title,
             "source": "Google Trends",
             "timestamp": datetime.datetime.utcnow(),
-            "rank": i + 1  # lower = more popular
+            "rank": i + 1
         })
 
     # -------- YouTube --------
@@ -119,52 +170,57 @@ def update_trends():
             "timestamp": datetime.datetime.utcnow()
         })
 
+    # -------- Twitter Trends --------
+    twitter_trends = fetch_twitter_trends()
+    for trend in twitter_trends[:5]:
+        raw_data.append({
+            "title": trend,
+            "source": "Twitter/X",
+            "timestamp": datetime.datetime.utcnow(),
+            "rank": 1
+        })
+
     # -------------------------------
     # Aggregation
     # -------------------------------
     trend_map = {}
 
     for item in raw_data:
-        tag = generate_smart_tag(item["title"])
+        new_tag = generate_smart_tag(item["title"])
+        matched_tag = find_matching_tag(new_tag, trend_map.keys())
+
         rec = recency_score(item["timestamp"])
 
-        # -------------------------
-        # SEARCH VOLUME SCORE
-        # -------------------------
+        # Volume score
         if item["source"] == "Google Trends":
-            volume_score = (6 - item["rank"]) * 20  # rank1=100, rank5=20
+            volume_score = (6 - item["rank"]) * 20
+        elif item["source"] == "Twitter/X":
+            volume_score = 80
         else:
-            volume_score = 30  # base for other sources
+            volume_score = 30
 
-        # -------------------------
-        # RECENCY SCORE
-        # -------------------------
         rec_score = rec * 50
 
-        # -------------------------
-        # INIT
-        # -------------------------
-        if tag not in trend_map:
-            trend_map[tag] = {
-                "tag_name": tag,
+        if matched_tag not in trend_map:
+            trend_map[matched_tag] = {
+                "tag_name": matched_tag,
                 "description": item["title"],
                 "category": classify(item["title"]),
                 "score": 0,
                 "mentions": 0
             }
 
-        trend_map[tag]["score"] += (volume_score + rec_score)
-        trend_map[tag]["mentions"] += 1
+        trend_map[matched_tag]["score"] += (volume_score + rec_score)
+        trend_map[matched_tag]["mentions"] += 1
 
     # -------------------------------
-    # SPIKE DETECTION
+    # Final Ranking + Spike
     # -------------------------------
     final_output = []
 
     for data in trend_map.values():
         total_score = data["score"]
 
-        # spike bonus
         if data["mentions"] >= 3:
             total_score *= 1.5
         elif data["mentions"] == 2:
@@ -175,9 +231,9 @@ def update_trends():
             "description": data["description"],
             "category": data["category"],
             "heat_score": int(total_score),
+            "mentions": data["mentions"]
         })
 
-    # sort
     final_sorted = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)
 
     # -------------------------------
