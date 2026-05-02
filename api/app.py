@@ -175,7 +175,6 @@ def update_trends():
             "description": data["description"],
             "category": data["category"],
             "heat_score": int(total_score),
-            "mentions": data["mentions"]
         })
 
     # sort
