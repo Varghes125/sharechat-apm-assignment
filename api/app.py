@@ -92,3 +92,18 @@ def update_trends():
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/get_trends")
+def get_trends():
+    if not supabase:
+        return {"error": "Supabase not connected"}
+    
+    # Fetch top 15 trends ranked by heat_score
+    response = supabase.table("trending_tags")\
+        .select("*")\
+        .order("heat_score", desc=True)\
+        .limit(15)\
+        .execute()
+        
+    return response.data
