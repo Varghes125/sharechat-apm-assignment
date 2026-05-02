@@ -222,7 +222,7 @@ def update_trends():
             "source": "Multiple" if len(data["sources"]) > 1 else list(data["sources"])[0]
         })
 
-    top_output = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)[:10]
+    top_output = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)[:20]
 
     # -------------------------------
     # Store
