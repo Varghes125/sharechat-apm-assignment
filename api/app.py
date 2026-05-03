@@ -65,7 +65,7 @@ def get_smart_tag_and_category(title):
     words = cleaned_title.split()
     
     # RULE 2: Reject small/vague descriptions immediately
-    if len(words) < 8: 
+    if len(words) < 5: 
         return None, None 
 
     if not model: 
@@ -230,3 +230,27 @@ def get_trends():
     if not supabase: return []
     res = supabase.table("trending_tags").select("*").order("heat_score", desc=True).execute()
     return res.data
+
+
+
+@app.get("/test_gemini")
+def test_gemini():
+    """A simple endpoint to verify if the Gemini API is connected and working."""
+    if not model:
+        return {
+            "status": "error", 
+            "message": "Gemini model is NOT configured. Your GEMINI_API_KEY environment variable is missing or invalid."
+        }
+    
+    try:
+        # Send a tiny test prompt to Gemini
+        response = model.generate_content("Hello! Please reply with exactly: 'Gemini is connected and working!'")
+        return {
+            "status": "success", 
+            "gemini_response": response.text.strip()
+        }
+    except Exception as e:
+        return {
+            "status": "error", 
+            "message": f"Gemini API failed to respond. Error details: {str(e)}"
+        }
