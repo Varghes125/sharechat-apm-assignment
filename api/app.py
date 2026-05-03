@@ -29,7 +29,7 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
 HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
-HF_API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct"
+HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-2-2b-it"
 # -------------------------------
 # ROBUST NLP FALLBACK
 # -------------------------------
