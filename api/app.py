@@ -250,3 +250,14 @@ def get_trends():
     if not supabase: return []
     res = supabase.table("trending_tags").select("*").order("heat_score", desc=True).execute()
     return res.data
+
+@app.get("/debug_ai")
+def debug_ai():
+    """A dedicated endpoint to test EXACTLY one headline and see the raw AI output."""
+    test_headline = "पश्चिम बंगाल में नतीजे से पहले बवाल; भाजपा कार्यकर्ता के घर पर गोलीबारी, 2 गिरफ्तार"
+    tag, cat = get_smart_tag_and_category(test_headline)
+    return {
+        "input": test_headline,
+        "resulting_tag": tag,
+        "resulting_category": cat
+    }
