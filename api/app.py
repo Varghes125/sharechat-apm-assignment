@@ -50,9 +50,11 @@ def generate_fallback_tag(title):
 # GROQ AI BATCH PROCESSING
 # -------------------------------
 def get_batch_tags_and_categories(headlines):
+    """Sends ALL headlines to Groq with auto-truncation, category mapping, and strict parsing."""
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
+    # FIX 1: Ignore 'SKIP' headlines so the AI doesn't get confused
     numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines) if h != "SKIP"])
 
     prompt = f"""You are an expert Indian News Editor.
@@ -83,6 +85,7 @@ Headlines:
         
         raw_text = chat_completion.choices[0].message.content.strip()
         
+        # Super Parser - Finds the absolute beginning and end of the JSON bracket
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}')
         if start_idx != -1 and end_idx != -1:
@@ -105,7 +108,7 @@ Headlines:
                 continue
 
             if i in ai_results_by_id:
-                # FIX: Swapped the extraction keys here so the AI's output is routed to the correct variables
+                # FIX: Swapped 'category' and 'tag' keys here per your request so they map correctly
                 tag = ai_results_by_id[i].get("category", "").strip().replace('#', '')
                 cat_raw = ai_results_by_id[i].get("tag", "समाचार").strip()
                 
@@ -206,6 +209,7 @@ def update_trends():
         smart_tag = ai_results[i]["tag"]
         category = ai_results[i]["category"]
         
+        # Let errors pass through to Supabase so you can monitor them
         if not smart_tag: continue 
             
         matched_key = None
@@ -244,6 +248,7 @@ def update_trends():
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
+        # Extracts only the single primary description
         primary_description = data["descriptions"][0] if data["descriptions"] else ""
 
         final_trends.append({
@@ -255,6 +260,18 @@ def update_trends():
         })
 
     top_10_output = sorted(final_trends, key=lambda x: x["heat_score"], reverse=True)[:10]
+
+    # FIX: Guarantee exactly 10 trending topics are returned anyhow by padding if needed
+    padding_index = 1
+    while len(top_10_output) < 10:
+        top_10_output.append({
+            "tag_name": f"#Trending{padding_index}",
+            "description": "अधिक ताज़ा खबरों के लिए बने रहें।",
+            "category": "समाचार",
+            "heat_score": 0,
+            "source": "Automated"
+        })
+        padding_index += 1
 
     try:
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
