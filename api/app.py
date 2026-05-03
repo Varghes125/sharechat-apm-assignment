@@ -3,10 +3,9 @@ from supabase import create_client
 import feedparser
 import os
 import re
-import datetime
 import urllib.request
 import requests
-from bs4 import BeautifulSoup
+from collections import Counter
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -20,196 +19,189 @@ app.add_middleware(
 )
 
 # -------------------------------
-# Supabase Setup
+# CONFIGURATION
 # -------------------------------
 url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
-# -------------------------------
-# STOPWORDS & NLP Helpers
-# -------------------------------
-STOPWORDS = set([
-    "the","is","at","which","on","and","a","an","in","to","for","of","with","by",
-    "from","that","this","it","as","are","was","were", "live", "updates", "news"
-])
-
-def normalize(word):
-    return word[:-1] if word.endswith("s") else word
+HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
+# We use MNLI for both categorization and tag generation as it handles zero-shot semantic matching perfectly.
+HF_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-mnli"
 
 # -------------------------------
-# Tag Generator (Multi-word focus)
+# INTELLIGENT NLP HELPERS
 # -------------------------------
-def generate_smart_tag(title):
-    # Clean delimiters often found in news (e.g., "ABP News: Title")
-    main_part = title.split('|')[0].split('-')[0].split(':')[0].strip()
-    clean_title = re.sub(r'[^a-zA-Z0-9\s]', '', main_part).lower()
+def get_ai_category(title):
+    """Zero-shot classification into ShareChat-friendly categories in Hindi."""
+    if not HF_TOKEN: return "विविध" (Miscellaneous)
+    
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    # Using English labels for the model to understand, but we map them to Hindi
+    candidate_labels = ["Politics", "Technology", "Entertainment", "Sports", "Finance", "International", "Crime"]
+    
+    payload = {"inputs": title, "parameters": {"candidate_labels": candidate_labels}}
+    
+    # Mapping English categories to Hindi for the final output
+    category_map = {
+        "Politics": "राजनीति",
+        "Technology": "तकनीक",
+        "Entertainment": "मनोरंजन",
+        "Sports": "खेल",
+        "Finance": "व्यापार",
+        "International": "अंतर्राष्ट्रीय",
+        "Crime": "क्राइम",
+        "News": "समाचार"
+    }
 
-    words = [normalize(w) for w in clean_title.split() if w not in STOPWORDS]
-    # Grab 2-4 words for a more descriptive tag
-    tag_words = words[:3] if len(words) >= 3 else words
-
-    return " ".join([w.capitalize() for w in tag_words])
-
-# -------------------------------
-# Similarity & Clustering
-# -------------------------------
-def similarity(tag1, tag2):
-    set1 = set(tag1.lower().split())
-    set2 = set(tag2.lower().split())
-    return len(set1 & set2) / len(set1 | set2) if set1 and set2 else 0
-
-def find_matching_tag(new_tag, existing_tags):
-    best_match = None
-    best_score = 0
-    for tag in existing_tags:
-        score = similarity(new_tag, tag)
-        if score > best_score:
-            best_score = score
-            best_match = tag
-    return best_match if best_score >= 0.4 else new_tag
-
-# -------------------------------
-# Category Logic
-# -------------------------------
-def classify(text):
-    text = text.lower()
-    if any(x in text for x in ["cricket", "ipl", "match", "sports", "football"]):
-        return "Sports"
-    elif any(x in text for x in ["movie", "ott", "trailer", "actor", "bollywood"]):
-        return "Entertainment"
-    elif any(x in text for x in ["rbi", "market", "stock", "sensex", "finance"]):
-        return "Finance"
-    elif any(x in text for x in ["election", "bjp", "modi", "congress", "politics"]):
-        return "Politics"
-    elif any(x in text for x in ["ai", "iphone", "google", "tech", "gadget"]):
-        return "Technology"
-    return "General"
-
-# -------------------------------
-# Scoring Components
-# -------------------------------
-def recency_score(ts):
-    diff = (datetime.datetime.utcnow() - ts).total_seconds()
-    return max(0, 1 - diff / 43200)  # 12-hour decay
-
-def fetch_twitter_trends():
-    trends = []
     try:
-        url = "https://trends24.in/india/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(response.text, "html.parser")
-        trend_lists = soup.find_all("ol")
-        for ol in trend_lists[:1]:
-            for li in ol.find_all("li")[:10]:
-                trend = li.text.strip()
-                if trend: trends.append(trend)
-    except Exception as e:
-        print("Twitter scrape failed:", e)
-    return trends
+        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=7)
+        top_label = response.json()['labels'][0]
+        return category_map.get(top_label, "समाचार")
+    except: return "समाचार"
+
+def generate_smart_tag(title):
+    """Extracts the core entity/theme from the text using semantic candidate ranking."""
+    # Pre-cleaning: Remove source names (e.g., "ABP News:") and punctuation
+    clean_title = title.split('|')[0].split('-')[0].split(':')[0].strip()
+    clean_title = re.sub(r'[^a-zA-Z0-9\u0900-\u097F\s]', '', clean_title) # Keep English and Hindi chars
+    
+    words = clean_title.split()
+    
+    # Rule 3 validation: If the description has fewer than 6 words, it's invalid.
+    if len(words) < 6:
+        return None
+
+    if not HF_TOKEN:
+        # Basic fallback: First 3 words
+        return " ".join(words[:3])
+
+    # Generate multi-word candidates for the AI to evaluate
+    candidates = []
+    candidates.append(" ".join(words[:2]))
+    candidates.append(" ".join(words[:3]))
+    if len(words) >= 4:
+        candidates.append(" ".join(words[:4]))
+
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {"inputs": clean_title, "parameters": {"candidate_labels": candidates}}
+    
+    try:
+        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=7)
+        # The AI returns the candidate phrase that best summarizes the sentence
+        best_tag = response.json()['labels'][0]
+        return f"#{best_tag}"
+    except:
+        return f"#{' '.join(words[:3])}"
 
 # -------------------------------
-# Endpoints
+# DATA COLLECTION MODULE
+# -------------------------------
+def fetch_sources():
+    """Collects raw data and assigns base authority weights."""
+    raw_data = []
+
+    # 1. Google News Hindi (High Authority)
+    google_feed = feedparser.parse("https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi")
+    for entry in google_feed.entries[:15]:
+        raw_data.append({"title": entry.title, "source": "Google News", "base_score": 100})
+
+    # 2. Twitter/X India Trends (High Velocity)
+    try:
+        req = urllib.request.Request("https://trends24.in/india/feed/", headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as res:
+            x_feed = feedparser.parse(res.read())
+        for entry in x_feed.entries[:10]:
+            raw_data.append({"title": entry.title, "source": "X/Twitter", "base_score": 90})
+    except: pass
+
+    # 3. Reddit India (High Engagement)
+    reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
+    for entry in reddit_feed.entries[:10]:
+        raw_data.append({"title": entry.title, "source": "Reddit", "base_score": 80})
+
+    return raw_data
+
+# -------------------------------
+# MAIN API ENDPOINTS
 # -------------------------------
 @app.get("/")
 def root():
-    return {"message": "Trend Engine Active", "supabase": supabase is not None}
+    return {"message": "ShareChat Trend Engine Active", "supabase_connected": supabase is not None}
 
 @app.get("/update_trends")
 def update_trends():
-    if not supabase:
-        return {"error": "Supabase not configured"}
+    if not supabase: return {"error": "Supabase missing"}
+    
+    # 1. Collect Data
+    raw_scraped_data = fetch_sources()
+    
+    # 2. Aggregation Dictionary
+    trend_groups = {}
 
-    raw_data = []
+    for item in raw_scraped_data:
+        # Extract the semantic tag. Returns None if description < 6 words.
+        smart_tag = generate_smart_tag(item["title"])
+        
+        # Rule 3 Enforcement: Skip items that are too short/vague
+        if not smart_tag:
+            continue
+            
+        category = get_ai_category(item["title"])
+        
+        # Normalize the key for grouping (e.g. "#WestBengal" == "#westbengal")
+        group_key = smart_tag.lower().replace(" ", "")
 
-    # 1. Google News
-    google_feed = feedparser.parse("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en")
-    for entry in google_feed.entries[:10]:
-        ts = datetime.datetime(*entry.published_parsed[:6]) if "published_parsed" in entry else datetime.datetime.utcnow()
-        raw_data.append({"title": entry.title, "source": "Google News", "timestamp": ts})
-
-    # 2. Reddit India
-    reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
-    for entry in reddit_feed.entries[:10]:
-        raw_data.append({"title": entry.title, "source": "Reddit", "timestamp": datetime.datetime.utcnow()})
-
-    # 3. Google Trends
-    trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
-    for i, entry in enumerate(trends_feed.entries[:10]):
-        raw_data.append({"title": entry.title, "source": "Google Trends", "timestamp": datetime.datetime.utcnow(), "rank": i + 1})
-
-    # 4. Twitter Trends
-    twitter_trends = fetch_twitter_trends()
-    for trend in twitter_trends[:10]:
-        raw_data.append({"title": trend, "source": "Twitter/X", "timestamp": datetime.datetime.utcnow()})
-
-    # Aggregation
-    trend_map = {}
-    for item in raw_data:
-        new_tag = generate_smart_tag(item["title"])
-        matched_tag = find_matching_tag(new_tag, trend_map.keys())
-
-        # Scoring Logic
-        rec = recency_score(item["timestamp"])
-        if item["source"] == "Google Trends":
-            volume_score = 100 # High authority
-        elif item["source"] == "Twitter/X":
-            volume_score = 80
-        else:
-            volume_score = 40
-
-        if matched_tag not in trend_map:
-            trend_map[matched_tag] = {
-                "tag_name": matched_tag,
+        if group_key not in trend_groups:
+            trend_groups[group_key] = {
+                "tag_name": smart_tag,
                 "description": item["title"],
-                "category": classify(item["title"]),
+                "category": category,
                 "score": 0,
+                "sources_involved": set(),
                 "mentions": 0
             }
 
-        trend_map[matched_tag]["score"] += (volume_score + (rec * 50))
-        trend_map[matched_tag]["mentions"] += 1
+        # Add points to this specific trend group
+        trend_groups[group_key]["mentions"] += 1
+        trend_groups[group_key]["sources_involved"].add(item["source"])
+        trend_groups[group_key]["score"] += item["base_score"]
 
-    # Final Ranking & Multi-Source Spike
-    final_output = []
-    for data in trend_map.values():
+    # 3. Ranking Engine
+    final_trends = []
+    for key, data in trend_groups.items():
         total_score = data["score"]
-        # Multi-source validation boost
-        if data["mentions"] >= 3:
+        sources = list(data["sources_involved"])
+        
+        # The Viral Multiplier: If a trend appears on more than 1 platform, it is highly validated.
+        if len(sources) > 1:
             total_score *= 2.0
-        elif data["mentions"] == 2:
-            total_score *= 1.5
+            
+        # Format Source display for the UI
+        source_display = ", ".join(sources)
 
-        final_output.append({
+        final_trends.append({
             "tag_name": data["tag_name"],
-            "description": data["description"],
-            "category": data["category"],
-            "heat_score": int(total_score)
+            "description": data["description"], # Keeping original description
+            "category": data["category"],       # Now in Hindi
+            "heat_score": int(total_score),
+            "source": source_display            # Rule 1 satisfied
         })
 
-    # Sort and strictly take the Top 10
-    final_sorted_top_10 = sorted(final_output, key=lambda x: x["heat_score"], reverse=True)[:10]
+    # Sort by Heat Score and strict cutoff at Top 10
+    top_10_output = sorted(final_trends, key=lambda x: x["heat_score"], reverse=True)[:10]
 
-    # Store in Supabase
+    # 4. Storage Update
     try:
-        # Clear existing
         supabase.table("trending_tags").delete().neq("tag_name", "placeholder").execute()
-        # Insert only top 10
-        if final_sorted_top_10:
-            supabase.table("trending_tags").insert(final_sorted_top_10).execute()
-
-        return {
-            "status": "success",
-            "count": len(final_sorted_top_10),
-            "trends": final_sorted_top_10
-        }
+        if top_10_output:
+            supabase.table("trending_tags").insert(top_10_output).execute()
+        return {"status": "success", "trends_found": len(top_10_output)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 @app.get("/get_trends")
 def get_trends():
     if not supabase: return []
-    # Always ordered by heat_score, limited by the update logic
     res = supabase.table("trending_tags").select("*").order("heat_score", desc=True).execute()
     return res.data
