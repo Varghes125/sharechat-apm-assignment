@@ -29,8 +29,7 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
 HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
-HF_API_URL = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
-
+HF_API_URL = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct"
 # -------------------------------
 # ROBUST NLP FALLBACK
 # -------------------------------
@@ -68,15 +67,16 @@ def get_smart_tag_and_category(title):
         "Content-Type": "application/json"
     }
     
-    # We explicitly ask for JSON format without markdown wrappers
-    prompt = f"""<|system|>
-You are an expert Indian News Editor. Respond ONLY with valid JSON.
-<|user|>
+    # WE USE QWEN'S STRICT CHAT FORMAT TO GUARANTEE JSON
+    prompt = f"""<|im_start|>system
+You are an expert Indian News Editor. Respond ONLY with valid JSON. Do not use markdown wrappers.<|im_end|>
+<|im_start|>user
 Read this headline: "{cleaned_title}"
 Extract a 2 to 3 word tag representing the core entity (e.g., "पश्चिम बंगाल चुनाव", "Stock Market").
 Categorize it strictly into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
-Return ONLY a raw JSON object with keys "tag" and "category". Do not use markdown blocks.
-<|assistant|>"""
+Return ONLY a raw JSON object with keys "tag" and "category".<|im_end|>
+<|im_start|>assistant
+"""
 
 
 
