@@ -36,9 +36,12 @@ def get_smart_tag_and_category(title):
     clean_title = title.split('|')[0].split('-')[0].split(':')[0].strip()
     words = clean_title.split()
     
-    if len(words) < 5: return None, None # Reject vague descriptions
+    # Reject vague or extremely short descriptions
+    if len(words) < 5: 
+        return None, None 
 
-    if not HF_TOKEN: return f"#{' '.join(words[:3])}", "समाचार"
+    if not HF_TOKEN: 
+        return f"#{' '.join(words[:3])}", "समाचार"
 
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     prompt = f"""[INST] You are a ShareChat Hindi News Editor. Read this headline: "{clean_title}"
@@ -54,17 +57,17 @@ def get_smart_tag_and_category(title):
         
         if "|" in result_text:
             tag, category = result_text.split("|", 1)
+            # Ensure the tag is clean and has a single hashtag
             return f"#{tag.strip().replace('#', '')}", category.strip()
     except Exception:
         pass
+        
     return f"#{' '.join(words[:3])}", "समाचार"
 
 def is_similar_tag(new_tag, existing_tag, threshold=0.65):
     """Compares two tags to see if they mean the same thing (e.g., #बंगाल चुनाव and #पश्चिम बंगाल चुनाव)"""
-    # Clean tags for pure string comparison
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
     t2 = existing_tag.replace("#", "").replace(" ", "").lower()
-    # Returns a ratio from 0.0 to 1.0
     return difflib.SequenceMatcher(None, t1, t2).ratio() > threshold
 
 # -------------------------------
@@ -76,8 +79,10 @@ def fetch_sources():
     now = datetime.now(timezone.utc)
 
     def parse_time(entry):
-        try: return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        except: return now
+        try: 
+            return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        except: 
+            return now
 
     # 1. Google Trends India (Pure Search Volume - Highest Weight: 120)
     trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
@@ -92,6 +97,10 @@ def fetch_sources():
     bbc_feed = feedparser.parse("https://feeds.bbci.co.uk/hindi/rss.xml")
     for entry in bbc_feed.entries[:10]:
         raw_data.append({"title": entry.title, "source": "BBC Hindi", "base_score": 85, "time": parse_time(entry)})
+
+    news18_feed = feedparser.parse("https://hindi.news18.com/rss/khabar/nation/nation.xml")
+    for entry in news18_feed.entries[:10]:
+        raw_data.append({"title": entry.title, "source": "News18", "base_score": 85, "time": parse_time(entry)})
 
     # 3. Reddit India (Community Engagement - Weight: 70)
     reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
@@ -116,7 +125,8 @@ def update_trends():
 
     for item in raw_scraped_data:
         smart_tag, category = get_smart_tag_and_category(item["title"])
-        if not smart_tag: continue # Skip if content is too thin
+        if not smart_tag: 
+            continue 
             
         # --- DEDUPLICATION & GROUPING LOGIC ---
         matched_key = None
@@ -129,8 +139,8 @@ def update_trends():
         if not matched_key:
             matched_key = smart_tag
             trend_groups[matched_key] = {
-                "tag_name": smart_tag, # Keep the best formatted version
-                "descriptions": [],    # List to hold multiple headlines
+                "tag_name": smart_tag, 
+                "descriptions": [],    
                 "category": category,
                 "score": 0,
                 "sources_involved": set(),
@@ -161,8 +171,8 @@ def update_trends():
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        # Format Descriptions into a clean bulleted list for UI
-        formatted_descriptions = "\n".join([f"• {desc}" for desc in data["descriptions"][:3]]) # Max 3 context points
+        # Format Descriptions into a clean bulleted list for UI (Max 3 contexts)
+        formatted_descriptions = "\n".join([f"• {desc}" for desc in data["descriptions"][:3]]) 
 
         final_trends.append({
             "tag_name": data["tag_name"],
