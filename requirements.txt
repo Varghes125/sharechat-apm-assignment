@@ -4,4 +4,4 @@ supabase
 feedparser
 beautifulsoup4
 requests
-google-generativeai>=0.8.0
+groq
