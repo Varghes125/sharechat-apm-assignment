@@ -54,7 +54,7 @@ def get_batch_tags_and_categories(headlines):
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
-    numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines)])
+    numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines) if h != "SKIP"])
 
     prompt = f"""You are an expert Indian News Editor.
 Read these {len(headlines)} news headlines carefully.
@@ -75,7 +75,7 @@ Headlines:
 {numbered_list}
 """
 
-    try:
+try:
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
@@ -83,8 +83,12 @@ Headlines:
         )
         
         raw_text = chat_completion.choices[0].message.content.strip()
-        if raw_text.startswith("```"):
-            raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+        
+        # SUPER PARSER: Finds the absolute beginning and end of the JSON bracket
+        start_idx = raw_text.find('{')
+        end_idx = raw_text.rfind('}')
+        if start_idx != -1 and end_idx != -1:
+            raw_text = raw_text[start_idx:end_idx+1]
             
         data_dict = json.loads(raw_text)
         data_array = data_dict.get("data", [])
@@ -199,7 +203,7 @@ def update_trends():
         smart_tag = ai_results[i]["tag"]
         category = ai_results[i]["category"]
         
-        if not smart_tag or "ERR" in category: continue 
+        if not smart_tag: continue
             
         matched_key = None
         for existing_key in trend_groups.keys():
