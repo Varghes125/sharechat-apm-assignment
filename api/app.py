@@ -5,6 +5,8 @@ import os
 import requests
 import math
 import difflib
+import re
+from collections import Counter
 from datetime import datetime, timezone
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -26,91 +28,130 @@ key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
 HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
+# Using Mistral for intelligent Entity Extraction
 HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
 
 # -------------------------------
-# AI & NLP HELPERS
+# ROBUST NLP & FALLBACK LOGIC
 # -------------------------------
-def get_smart_tag_and_category(title):
-    """Uses LLM to extract a focused 2-3 word Hindi tag and Category."""
-    clean_title = title.split('|')[0].split('-')[0].split(':')[0].strip()
-    words = clean_title.split()
+HINDI_STOPWORDS = {"में", "के", "और", "पर", "से", "लिए", "है", "की", "को", "ने", "इन", "का", "एक", "यह", "तथा", "वाला", "वाली", "क्या", "क्यों", "कैसे", "कहा", "गया"}
+ENGLISH_STOPWORDS = {"the", "is", "at", "which", "on", "and", "a", "an", "in", "to", "for", "of", "with", "by", "from", "that", "after", "hit", "as", "sees", "news", "live", "updates"}
+
+def clean_text(text):
+    """Removes source names and special characters."""
+    clean = text.split('|')[0].split('-')[0].split(':')[0].strip()
+    return re.sub(r'[^\w\s\u0900-\u097F]', '', clean) # Keep English & Hindi chars
+
+def generate_fallback_tag(title):
+    """Tier 2 Logic: If AI fails, extracts meaningful entities, NEVER just the first 3 words."""
+    cleaned = clean_text(title)
+    words = cleaned.split()
     
-    # Reject vague or extremely short descriptions
-    if len(words) < 5: 
+    # Filter out stopwords and very short words
+    meaningful_words = [w for w in words if w.lower() not in ENGLISH_STOPWORDS and w not in HINDI_STOPWORDS and len(w) > 2]
+    
+    # If we still don't have enough, it's not a trend
+    if len(meaningful_words) < 2:
+        return None
+        
+    # Take up to 3 meaningful words to form a coherent phrase
+    return f"#{' '.join(meaningful_words[:3])}"
+
+def get_smart_tag_and_category(title):
+    """Tier 1 Logic: Tries LLM for perfect tagging and categorization."""
+    cleaned_title = clean_text(title)
+    words = cleaned_title.split()
+    
+    # RULE 2: Reject small/vague descriptions immediately
+    if len(words) < 8: 
         return None, None 
 
     if not HF_TOKEN: 
-        return f"#{' '.join(words[:3])}", "समाचार"
+        return generate_fallback_tag(cleaned_title), "समाचार"
 
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    prompt = f"""[INST] You are a ShareChat Hindi News Editor. Read this headline: "{clean_title}"
-    Task 1: Extract the core subject in exactly 2 to 3 words in Hindi (e.g., लोकसभा चुनाव, शेयर बाजार).
-    Task 2: Categorize it strictly into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
+    # Strict prompt to prevent AI from chatting or hallucinating
+    prompt = f"""[INST] You are a News Editor. Read this headline: "{cleaned_title}"
+    Task 1: Extract the core subject in exactly 2 to 3 words. (e.g., पश्चिम बंगाल चुनाव, Share Market). Do NOT use connecting words.
+    Task 2: Categorize it into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
     Format EXACTLY as: TAG | CATEGORY [/INST]"""
 
     payload = {"inputs": prompt, "parameters": {"max_new_tokens": 15, "temperature": 0.1}}
     
     try:
-        res = requests.post(HF_API_URL, headers=headers, json=payload, timeout=8)
+        res = requests.post(HF_API_URL, headers=headers, json=payload, timeout=5)
+        
+        # RULE 5: Catch Rate Limits/API errors silently
+        if 'error' in res.json():
+            return generate_fallback_tag(cleaned_title), "समाचार"
+            
         result_text = res.json()[0]['generated_text'].strip()
         
-        if "|" in result_text:
-            tag, category = result_text.split("|", 1)
-            # Ensure the tag is clean and has a single hashtag
-            return f"#{tag.strip().replace('#', '')}", category.strip()
+        # Extract using Regex to ensure format compliance
+        match = re.search(r'([^\n\|]+)\s*\|\s*([^\n]+)', result_text)
+        if match:
+            tag = match.group(1).strip().replace('#', '')
+            category = match.group(2).strip()
+            
+            # Sanity check: If AI generated a sentence instead of a tag, reject it
+            if len(tag.split()) > 4:
+                return generate_fallback_tag(cleaned_title), "समाचार"
+                
+            return f"#{tag}", category
+            
     except Exception:
         pass
         
-    return f"#{' '.join(words[:3])}", "समाचार"
+    # If all API logic fails, fall back to robust NLP
+    return generate_fallback_tag(cleaned_title), "समाचार"
 
-def is_similar_tag(new_tag, existing_tag, threshold=0.65):
-    """Compares two tags to see if they mean the same thing (e.g., #बंगाल चुनाव and #पश्चिम बंगाल चुनाव)"""
+def is_similar_topic(new_tag, existing_tag, threshold=0.65):
+    """RULE 3: Semantic Clustering. Checks if #बंगाल चुनाव matches #पश्चिम बंगाल चुनाव."""
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
     t2 = existing_tag.replace("#", "").replace(" ", "").lower()
+    
+    # Direct substring match (e.g., 'बंगाल चुनाव' is in 'पश्चिम बंगाल चुनाव')
+    if t1 in t2 or t2 in t1: return True
+    
+    # Sequence matching for misspellings or slight variations
     return difflib.SequenceMatcher(None, t1, t2).ratio() > threshold
 
 # -------------------------------
-# ADVANCED DATA COLLECTION
+# DATA COLLECTION (High Quality Only)
 # -------------------------------
 def fetch_sources():
-    """Fetches feeds and assigns precise Base Weights based on impact."""
+    """RULE 6: Collates from highly relevant, high-velocity Indian feeds."""
     raw_data = []
     now = datetime.now(timezone.utc)
 
     def parse_time(entry):
-        try: 
-            return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        except: 
-            return now
+        try: return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        except: return now
 
-    # 1. Google Trends India (Pure Search Volume - Highest Weight: 120)
-    trends_feed = feedparser.parse("https://trends.google.com/trending/rss?geo=IN")
-    for entry in trends_feed.entries[:10]:
-        raw_data.append({"title": entry.title, "source": "Google Trends", "base_score": 120, "time": parse_time(entry)})
+    # High Authority Sources
+    sources = [
+        ("Google Trends", "https://trends.google.com/trending/rss?geo=IN", 120),
+        ("Google News", "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi", 85),
+        ("BBC Hindi", "https://feeds.bbci.co.uk/hindi/rss.xml", 85),
+        ("Reddit India", "https://www.reddit.com/r/india/hot/.rss", 70)
+    ]
 
-    # 2. Mainstream Hindi News (High Credibility - Weight: 85)
-    google_feed = feedparser.parse("https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi")
-    for entry in google_feed.entries[:10]:
-        raw_data.append({"title": entry.title, "source": "Google News", "base_score": 85, "time": parse_time(entry)})
-
-    bbc_feed = feedparser.parse("https://feeds.bbci.co.uk/hindi/rss.xml")
-    for entry in bbc_feed.entries[:10]:
-        raw_data.append({"title": entry.title, "source": "BBC Hindi", "base_score": 85, "time": parse_time(entry)})
-
-    news18_feed = feedparser.parse("https://hindi.news18.com/rss/khabar/nation/nation.xml")
-    for entry in news18_feed.entries[:10]:
-        raw_data.append({"title": entry.title, "source": "News18", "base_score": 85, "time": parse_time(entry)})
-
-    # 3. Reddit India (Community Engagement - Weight: 70)
-    reddit_feed = feedparser.parse("https://www.reddit.com/r/india/hot/.rss")
-    for entry in reddit_feed.entries[:10]:
-        raw_data.append({"title": entry.title, "source": "Reddit", "base_score": 70, "time": parse_time(entry)})
+    for source_name, url, weight in sources:
+        try:
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:10]:
+                raw_data.append({
+                    "title": entry.title, 
+                    "source": source_name, 
+                    "base_score": weight, 
+                    "time": parse_time(entry)
+                })
+        except: pass
 
     return raw_data, now
 
 # -------------------------------
-# CORE ENGINE
+# CORE ENGINE & RANKING
 # -------------------------------
 @app.get("/")
 def root():
@@ -124,22 +165,24 @@ def update_trends():
     trend_groups = {}
 
     for item in raw_scraped_data:
+        # Tier 1 & Tier 2 Tagging logic
         smart_tag, category = get_smart_tag_and_category(item["title"])
-        if not smart_tag: 
-            continue 
+        
+        # RULE 2 Enforced: If tag generator returns None, discard.
+        if not smart_tag: continue 
             
-        # --- DEDUPLICATION & GROUPING LOGIC ---
+        # RULE 3 Enforced: Deduplication & Reusing Tags
         matched_key = None
         for existing_key in trend_groups.keys():
-            if is_similar_tag(smart_tag, existing_key):
+            if is_similar_topic(smart_tag, existing_key):
                 matched_key = existing_key
                 break
         
-        # If no similar tag exists, create a new group
+        # Initialize a new cluster if it doesn't exist
         if not matched_key:
             matched_key = smart_tag
             trend_groups[matched_key] = {
-                "tag_name": smart_tag, 
+                "tag_name": smart_tag,     # RULE 4: Spaces are retained here!
                 "descriptions": [],    
                 "category": category,
                 "score": 0,
@@ -147,14 +190,14 @@ def update_trends():
                 "mentions": 0
             }
 
-        # Append description only if it's not a duplicate headline
-        clean_desc = item["title"].split('-')[0].strip()
+        # Context Aggregation: Append description if it's unique
+        clean_desc = item["title"].split('-')[0].split('|')[0].strip()
         if clean_desc not in trend_groups[matched_key]["descriptions"]:
             trend_groups[matched_key]["descriptions"].append(clean_desc)
 
-        # --- SCIENTIFIC SCORING (Exponential Decay) ---
+        # RULE 7 Enforced: Sensible Scoring (Exponential Time Decay)
+        # News loses half its value every 12 hours. Pure relevance.
         hours_old = max(0, (current_time - item["time"]).total_seconds() / 3600)
-        # Half-life of 12 hours: Score drops by 50% every 12 hours
         time_decay_multiplier = math.exp(-hours_old / 12.0) 
 
         trend_groups[matched_key]["mentions"] += 1
@@ -167,11 +210,12 @@ def update_trends():
         total_score = data["score"]
         sources = list(data["sources_involved"])
         
-        # Dynamic Viral Multiplier: 1 source = 1x, 2 sources = 1.5x, 3 sources = 2.0x
+        # RULE 7 Enforced: The Consensus Multiplier
+        # If a topic appears on Reddit AND Google News, it's validated. (1.5x, 2.0x boost)
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        # Format Descriptions into a clean bulleted list for UI (Max 3 contexts)
+        # Format Descriptions: Display up to 3 distinct headlines covering the topic
         formatted_descriptions = "\n".join([f"• {desc}" for desc in data["descriptions"][:3]]) 
 
         final_trends.append({
@@ -182,7 +226,7 @@ def update_trends():
             "source": ", ".join(sources)
         })
 
-    # Strict cutoff: Top 10 hottest trends only
+    # Strict cutoff: Deliver ONLY the Top 10 hottest trends
     top_10_output = sorted(final_trends, key=lambda x: x["heat_score"], reverse=True)[:10]
 
     try:
