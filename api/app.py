@@ -73,15 +73,16 @@ Example format:
 Headlines:
 {numbered_list}
 """
-
-    try:
-        # Groq Llama-3 execution with forced JSON mode
+try:
+        # Groq Llama 3.1 execution with forced JSON mode
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "You are an expert Indian News Editor. You must output strictly in JSON format."},
-                {"role": "user", "content": prompt}
+                # We added the word JSON to the user prompt as well to satisfy Groq's strict 400-error checks
+                {"role": "user", "content": prompt + "\nRemember, return ONLY a valid JSON object."}
             ],
-            model="llama3-8b-8192",
+            # CHANGED: Upgraded to the current production model
+            model="llama-3.1-8b-instant",
             temperature=0.1,
             response_format={"type": "json_object"}
         )
@@ -107,7 +108,8 @@ Headlines:
         return results
         
     except Exception as e:
-        error_msg = str(e)[:20]
+        # CHANGED: Increased the error slice to 100 characters so we can see exactly what Groq is complaining about if it fails again
+        error_msg = str(e)[:100] 
         return [{"tag": generate_fallback_tag(h), "category": f"GROQ_ERR_{error_msg}"} for h in headlines]
 
 def is_similar_topic(new_tag, existing_tag, threshold=0.70):
