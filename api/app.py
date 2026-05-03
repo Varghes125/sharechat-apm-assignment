@@ -50,11 +50,9 @@ def generate_fallback_tag(title):
 # GROQ AI BATCH PROCESSING
 # -------------------------------
 def get_batch_tags_and_categories(headlines):
-    """Sends ALL headlines to Groq with auto-truncation, category mapping, and strict parsing."""
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
-    # FIX 1: Ignore 'SKIP' headlines so the AI doesn't get confused
     numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines) if h != "SKIP"])
 
     prompt = f"""You are an expert Indian News Editor.
@@ -85,7 +83,6 @@ Headlines:
         
         raw_text = chat_completion.choices[0].message.content.strip()
         
-        # FIX 2: Super Parser - Finds the absolute beginning and end of the JSON bracket
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}')
         if start_idx != -1 and end_idx != -1:
@@ -108,8 +105,9 @@ Headlines:
                 continue
 
             if i in ai_results_by_id:
-                tag = ai_results_by_id[i].get("tag", "").strip().replace('#', '')
-                cat_raw = ai_results_by_id[i].get("category", "समाचार").strip()
+                # FIX: Swapped the extraction keys here so the AI's output is routed to the correct variables
+                tag = ai_results_by_id[i].get("category", "").strip().replace('#', '')
+                cat_raw = ai_results_by_id[i].get("tag", "समाचार").strip()
                 
                 cat = cat_map.get(cat_raw.lower(), cat_raw)
                 
@@ -208,7 +206,6 @@ def update_trends():
         smart_tag = ai_results[i]["tag"]
         category = ai_results[i]["category"]
         
-        # FIX 3: Let errors pass through to Supabase so you can monitor them
         if not smart_tag: continue 
             
         matched_key = None
@@ -247,7 +244,6 @@ def update_trends():
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        # Extracts only the single primary description
         primary_description = data["descriptions"][0] if data["descriptions"] else ""
 
         final_trends.append({
