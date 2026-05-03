@@ -50,24 +50,25 @@ def generate_fallback_tag(title):
 # GROQ AI BATCH PROCESSING
 # -------------------------------
 def get_batch_tags_and_categories(headlines):
-    """Sends ALL headlines to Groq. API-level JSON lock is removed to prevent 400 errors."""
+    """Sends ALL headlines to Groq using strict ID Mapping to prevent Array Mismatches."""
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
-    numbered_list = "\n".join([f"{i}. {h}" for i, h in enumerate(headlines)])
+    # 1. We now inject a strict 'ID' into the prompt for the AI to track
+    numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines)])
 
     prompt = f"""You are an expert Indian News Editor.
 Read these {len(headlines)} news headlines carefully.
-For EACH headline:
-1. Extract a highly relevant 2 to 3 word tag representing the core theme (e.g., "पश्चिम बंगाल चुनाव", "Stock Market").
-2. Categorize it strictly into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
+For EACH headline, you MUST generate a tag and category. Do not skip any.
 
 Return ONLY a valid JSON object. Do not add any text before or after the JSON.
-The JSON must contain exactly one key "data", which is an array of objects in the exact order provided.
+The JSON must contain exactly one key "data", which is an array of objects.
+Each object MUST include the explicit "id" provided in the input.
 Example format:
 {{
   "data": [
-    {{"tag": "TagHere", "category": "CategoryHere"}}
+    {{"id": 0, "tag": "TagHere", "category": "CategoryHere"}},
+    {{"id": 1, "tag": "TagHere", "category": "CategoryHere"}}
   ]
 }}
 
@@ -76,43 +77,45 @@ Headlines:
 """
 
     try:
-        # We removed the response_format dict to bypass Groq's 400 error completely.
         chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
             temperature=0.0
         )
         
         raw_text = chat_completion.choices[0].message.content.strip()
-        
-        # Clean up markdown if the AI adds it (e.g. ```json ... ```)
         if raw_text.startswith("```"):
             raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
             
         data_dict = json.loads(raw_text)
         data_array = data_dict.get("data", [])
         
-        # Map the AI results back to our headlines safely
+        # 2. Build a dictionary linking the explicit ID to the AI's result
+        ai_results_by_id = {item.get("id"): item for item in data_array if "id" in item}
+        
+        # 3. Safely map results back to the original headlines using the ID
         results = []
         for i, h in enumerate(headlines):
-            if i < len(data_array):
-                tag = data_array[i].get("tag", "").strip().replace('#', '')
-                cat = data_array[i].get("category", "समाचार").strip()
+            if i in ai_results_by_id:
+                tag = ai_results_by_id[i].get("tag", "").strip().replace('#', '')
+                cat = ai_results_by_id[i].get("category", "समाचार").strip()
                 
                 if len(tag.split()) > 5 or len(tag) < 2:
                     results.append({"tag": generate_fallback_tag(h), "category": "TAG_TOO_LONG"})
                 else:
                     results.append({"tag": f"#{tag}", "category": cat})
             else:
-                results.append({"tag": generate_fallback_tag(h), "category": "ARRAY_MISMATCH"})
+                # If the AI skipped this specific ID, it only affects this one item!
+                results.append({"tag": generate_fallback_tag(h), "category": "AI_SKIPPED"})
                 
         return results
         
     except Exception as e:
         error_msg = str(e)[:100]
         return [{"tag": generate_fallback_tag(h), "category": f"GROQ_ERR_{error_msg}"} for h in headlines]
+
+
+
 def is_similar_topic(new_tag, existing_tag, threshold=0.70):
     """Rule 3: Semantic check to reuse existing tags."""
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
