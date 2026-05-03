@@ -6,6 +6,7 @@ import requests
 import math
 import difflib
 import re
+import json
 import google.generativeai as genai
 from datetime import datetime, timezone
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,94 +28,85 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
-# Initialize Gemini
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Using 'flash' because it is lightning fast and has a massive free tier
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    # Using strict system instructions to force pure JSON
+    model = genai.GenerativeModel(
+        model_name='gemini-2.5-flash',
+        system_instruction="You are a News Data Extractor. Always respond with pure, valid JSON. Never use markdown code blocks like ```json."
+    )
 else:
     model = None
 
 # -------------------------------
-# ROBUST NLP & FALLBACK LOGIC
+# AI TAGGING WITH VISIBLE DEBUGGING
 # -------------------------------
-HINDI_STOPWORDS = {"में", "के", "और", "पर", "से", "लिए", "है", "की", "को", "ने", "इन", "का", "एक", "यह", "तथा", "वाला", "वाली", "क्या", "क्यों", "कैसे", "कहा", "गया"}
-ENGLISH_STOPWORDS = {"the", "is", "at", "which", "on", "and", "a", "an", "in", "to", "for", "of", "with", "by", "from", "that", "after", "hit", "as", "sees", "news", "live", "updates"}
-
-def clean_text(text):
-    """Removes source names and special characters."""
-    clean = text.split('|')[0].split('-')[0].split(':')[0].strip()
-    return re.sub(r'[^\w\s\u0900-\u097F]', '', clean) # Keep English & Hindi chars
-
-def generate_fallback_tag(title):
-    """Tier 2 Logic: If AI fails, extracts meaningful entities, NEVER just the first 3 words."""
-    cleaned = clean_text(title)
-    words = cleaned.split()
-    
-    meaningful_words = [w for w in words if w.lower() not in ENGLISH_STOPWORDS and w not in HINDI_STOPWORDS and len(w) > 2]
-    
-    if len(meaningful_words) < 2:
-        return None
-        
-    return f"#{' '.join(meaningful_words[:3])}"
-
 def get_smart_tag_and_category(title):
-    """Tier 1 Logic: Tries Gemini with JSON output and disabled safety filters."""
-    cleaned_title = clean_text(title)
-    words = cleaned_title.split()
+    """Feeds the ENTIRE clean title to Gemini and catches explicit errors."""
     
-    # RULE 2: Reject small/vague descriptions immediately
-    if len(words) < 8: 
-        return None, None 
-
-    if not model: 
-        return generate_fallback_tag(cleaned_title), "समाचार"
-
-    # We now explicitly ask for JSON format
-    prompt = f"""Analyze this news headline: "{cleaned_title}"
-    1. Extract the core entity or topic in exactly 2 to 3 meaningful words (e.g., "पश्चिम बंगाल चुनाव", "Supreme Court", "Share Market"). 
-    2. Strictly remove junk words like 'में', 'के', 'after', 'on', 'killed'.
-    3. Categorize it strictly into ONE of these: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
+    # We clean the source name off the end, but keep the whole sentence for context
+    cleaned_title = title.split('|')[0].split('-')[0].strip()
     
-    Return a valid JSON object. Use these exact keys: "tag" and "category".
+    # Check 1: Is the description too small? (Less than 5 words)
+    if len(cleaned_title.split()) < 5:
+        return None, None
+
+    if not model:
+        return "#NO_API_KEY", "DEBUG_ERROR"
+
+    prompt = f"""Read this entire news headline carefully and understand its core theme: "{cleaned_title}"
+    
+    Task 1: Create a highly relevant 2 to 3 word tag representing the core theme (e.g., "पश्चिम बंगाल चुनाव", "Stock Market", "Donald Trump"). Do NOT just pick the first 3 words.
+    Task 2: Categorize it strictly into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
+    
+    Return ONLY a JSON object with keys "tag" and "category".
     """
 
     try:
-        # Force JSON output and turn OFF safety blocks for news headlines
+        # String-based safety settings to prevent SDK crashes
+        safety_settings = {
+            'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+            'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+            'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+            'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE'
+        }
+
         response = model.generate_content(
             prompt,
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            },
+            safety_settings=safety_settings,
             generation_config={"response_mime_type": "application/json"}
         )
         
-        # Parse the perfect JSON directly
-        data = json.loads(response.text)
-        tag = data.get("tag", "").strip().replace('#', '')
-        category = data.get("category", "समाचार").strip()
+        raw_text = response.text.strip()
         
-        # Sanity check
-        if len(tag.split()) > 4 or len(tag) < 2:
-            return generate_fallback_tag(cleaned_title), "समाचार"
+        # Check 2: Strip Markdown if Gemini stubbornly adds it
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+
+        # Parse the JSON
+        data = json.loads(raw_text)
+        tag = data.get("tag", "PARSE_FAIL").strip()
+        category = data.get("category", "PARSE_FAIL").strip()
+        
+        # Check 3: If AI hallucinates a massive sentence, catch it
+        if len(tag.split()) > 5:
+            return f"#TAG_TOO_LONG", "DEBUG_ERROR"
             
         return f"#{tag}", category
         
-    except Exception as e:
-        # If it fails, print the exact error to Vercel Logs so we can see why
-        print(f"Gemini Error for '{cleaned_title[:20]}...': {e}")
-        pass
+    except json.JSONDecodeError as e:
+        # If Gemini didn't return JSON, show us what it actually returned
+        snip = raw_text[:20].replace('\n', '')
+        return f"#JSON_ERR: {snip}", "DEBUG_ERROR"
         
-    # If API logic fails, fall back to robust NLP
-    return generate_fallback_tag(cleaned_title), "समाचार"
-    
+    except Exception as e:
+        # Check 4: If safety filter or network fails, write the exact error to DB
+        error_msg = str(e)[:30] # Truncate so it fits in Supabase
+        return f"#ERR: {error_msg}", "DEBUG_ERROR"
 
-def is_similar_topic(new_tag, existing_tag, threshold=0.65):
-    """RULE 3: Semantic Clustering. Checks if #बंगाल चुनाव matches #पश्चिम बंगाल चुनाव."""
+def is_similar_topic(new_tag, existing_tag, threshold=0.70):
+    """Semantic Check to reuse tags like #WestBengalElection and #BengalElections"""
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
     t2 = existing_tag.replace("#", "").replace(" ", "").lower()
     
@@ -122,13 +114,12 @@ def is_similar_topic(new_tag, existing_tag, threshold=0.65):
     return difflib.SequenceMatcher(None, t1, t2).ratio() > threshold
 
 # -------------------------------
-# DATA COLLECTION (High Quality Only)
+# DATA COLLECTION
 # -------------------------------
 def fetch_sources():
-    """RULE 6: Collates from highly relevant, high-velocity Indian feeds."""
     raw_data = []
     now = datetime.now(timezone.utc)
-
+    
     def parse_time(entry):
         try: return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
         except: return now
@@ -151,15 +142,25 @@ def fetch_sources():
                     "time": parse_time(entry)
                 })
         except: pass
-
     return raw_data, now
 
 # -------------------------------
-# CORE ENGINE & RANKING
+# ENDPOINTS
 # -------------------------------
 @app.get("/")
 def root():
-    return {"message": "ShareChat Trend Engine Active (Gemini)", "status": "Running"}
+    return {"status": "Running Cleaned Engine"}
+
+@app.get("/debug_ai")
+def debug_ai():
+    """A dedicated endpoint to test EXACTLY one headline and see the raw AI output."""
+    test_headline = "पश्चिम बंगाल में नतीजे से पहले बवाल; भाजपा कार्यकर्ता के घर पर गोलीबारी, 2 गिरफ्तार"
+    tag, cat = get_smart_tag_and_category(test_headline)
+    return {
+        "input": test_headline,
+        "resulting_tag": tag,
+        "resulting_category": cat
+    }
 
 @app.get("/update_trends")
 def update_trends():
@@ -171,10 +172,9 @@ def update_trends():
     for item in raw_scraped_data:
         smart_tag, category = get_smart_tag_and_category(item["title"])
         
-        # RULE 2 Enforced: If tag generator returns None, discard.
+        # If it's too short, skip it entirely
         if not smart_tag: continue 
             
-        # RULE 3 Enforced: Deduplication & Reusing Tags
         matched_key = None
         for existing_key in trend_groups.keys():
             if is_similar_topic(smart_tag, existing_key):
@@ -184,7 +184,7 @@ def update_trends():
         if not matched_key:
             matched_key = smart_tag
             trend_groups[matched_key] = {
-                "tag_name": smart_tag,     # RULE 4: Spaces are retained here!
+                "tag_name": smart_tag,     
                 "descriptions": [],    
                 "category": category,
                 "score": 0,
@@ -192,12 +192,10 @@ def update_trends():
                 "mentions": 0
             }
 
-        # Context Aggregation: Append description if it's unique
-        clean_desc = item["title"].split('-')[0].split('|')[0].strip()
+        clean_desc = item["title"].split('-')[0].strip()
         if clean_desc not in trend_groups[matched_key]["descriptions"]:
             trend_groups[matched_key]["descriptions"].append(clean_desc)
 
-        # RULE 7 Enforced: Sensible Scoring (Exponential Time Decay)
         hours_old = max(0, (current_time - item["time"]).total_seconds() / 3600)
         time_decay_multiplier = math.exp(-hours_old / 12.0) 
 
@@ -205,17 +203,14 @@ def update_trends():
         trend_groups[matched_key]["sources_involved"].add(item["source"])
         trend_groups[matched_key]["score"] += (item["base_score"] * time_decay_multiplier)
 
-    # --- RANKING & FINAL OUTPUT ---
     final_trends = []
     for key, data in trend_groups.items():
         total_score = data["score"]
         sources = list(data["sources_involved"])
         
-        # RULE 7 Enforced: The Consensus Multiplier
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        # Format Descriptions: Display up to 3 distinct headlines covering the topic
         formatted_descriptions = "\n".join([f"• {desc}" for desc in data["descriptions"][:3]]) 
 
         final_trends.append({
@@ -226,7 +221,6 @@ def update_trends():
             "source": ", ".join(sources)
         })
 
-    # Strict cutoff: Deliver ONLY the Top 10 hottest trends
     top_10_output = sorted(final_trends, key=lambda x: x["heat_score"], reverse=True)[:10]
 
     try:
@@ -236,33 +230,3 @@ def update_trends():
         return {"status": "success", "trends_found": len(top_10_output)}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
-@app.get("/get_trends")
-def get_trends():
-    if not supabase: return []
-    res = supabase.table("trending_tags").select("*").order("heat_score", desc=True).execute()
-    return res.data
-
-
-
-@app.get("/test_gemini")
-def test_gemini():
-    """A simple endpoint to verify if the Gemini API is connected and working."""
-    if not model:
-        return {
-            "status": "error", 
-            "message": "Gemini model is NOT configured. Your GEMINI_API_KEY environment variable is missing or invalid."
-        }
-    
-    try:
-        # Send a tiny test prompt to Gemini
-        response = model.generate_content("Hello! Please reply with exactly: 'Gemini is connected and working!'")
-        return {
-            "status": "success", 
-            "gemini_response": response.text.strip()
-        }
-    except Exception as e:
-        return {
-            "status": "error", 
-            "message": f"Gemini API failed to respond. Error details: {str(e)}"
-        }
