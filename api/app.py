@@ -50,10 +50,11 @@ def generate_fallback_tag(title):
 # GROQ AI BATCH PROCESSING
 # -------------------------------
 def get_batch_tags_and_categories(headlines):
-    """Sends ALL headlines to Groq with auto-truncation and category mapping."""
+    """Sends ALL headlines to Groq using strict ID Mapping to prevent Array Mismatches."""
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
+    # 1. We now inject a strict 'ID' into the prompt for the AI to track
     numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines)])
 
     prompt = f"""You are an expert Indian News Editor.
@@ -84,38 +85,27 @@ Headlines:
         
         raw_text = chat_completion.choices[0].message.content.strip()
         if raw_text.startswith("```"):
-            raw_text = re.sub(r'^
-```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+            raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
             
         data_dict = json.loads(raw_text)
         data_array = data_dict.get("data", [])
+        
+        # 2. Build a dictionary linking the explicit ID to the AI's result
         ai_results_by_id = {item.get("id"): item for item in data_array if "id" in item}
         
-        # Mapping English categories back to Hindi if the AI disobeys
-        cat_map = {
-            "sports": "खेल", "international": "अंतर्राष्ट्रीय", "politics": "राजनीति", 
-            "business": "व्यापार", "technology": "तकनीक", "tech": "तकनीक", 
-            "entertainment": "मनोरंजन", "crime": "क्राइम", "news": "समाचार", "education": "शिक्षा"
-        }
-        
+        # 3. Safely map results back to the original headlines using the ID
         results = []
         for i, h in enumerate(headlines):
             if i in ai_results_by_id:
                 tag = ai_results_by_id[i].get("tag", "").strip().replace('#', '')
-                cat_raw = ai_results_by_id[i].get("category", "समाचार").strip()
+                cat = ai_results_by_id[i].get("category", "समाचार").strip()
                 
-                # Force category mapping
-                cat = cat_map.get(cat_raw.lower(), cat_raw)
-                
-                if len(tag) < 2:
-                    results.append({"tag": generate_fallback_tag(h), "category": "TAG_TOO_SHORT"})
+                if len(tag.split()) > 5 or len(tag) < 2:
+                    results.append({"tag": generate_fallback_tag(h), "category": "TAG_TOO_LONG"})
                 else:
-                    # FIX: Truncate long tags instead of throwing an error
-                    words = tag.split()
-                    if len(words) > 4:
-                        tag = " ".join(words[:4])
                     results.append({"tag": f"#{tag}", "category": cat})
             else:
+                # If the AI skipped this specific ID, it only affects this one item!
                 results.append({"tag": generate_fallback_tag(h), "category": "AI_SKIPPED"})
                 
         return results
@@ -123,8 +113,6 @@ Headlines:
     except Exception as e:
         error_msg = str(e)[:100]
         return [{"tag": generate_fallback_tag(h), "category": f"GROQ_ERR_{error_msg}"} for h in headlines]
-
-        
 
 
 
@@ -243,22 +231,21 @@ def update_trends():
         trend_groups[matched_key]["sources_involved"].add(item["source"])
         trend_groups[matched_key]["score"] += (item["base_score"] * time_decay_multiplier)
 
- 
-# --- RANKING & OUTPUT ---
+    # --- RANKING & OUTPUT ---
     final_trends = []
     for key, data in trend_groups.items():
         total_score = data["score"]
         sources = list(data["sources_involved"])
         
+        # Rule 7: Consensus Multiplier
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        # FIX: Just grab the single primary description instead of a batch of 3
-        primary_description = data["descriptions"][0]
+        formatted_descriptions = "\n".join([f"• {desc}" for desc in data["descriptions"][:3]]) 
 
         final_trends.append({
             "tag_name": data["tag_name"],
-            "description": primary_description, # Assigned the single description here
+            "description": formatted_descriptions,
             "category": data["category"],       
             "heat_score": int(total_score),
             "source": ", ".join(sources)
