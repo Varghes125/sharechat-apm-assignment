@@ -28,8 +28,9 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
-HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
-HF_API_URL = "https://api-inference.huggingface.co/models/google/gemma-2-2b-it"
+# Initialize Groq Client
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 # -------------------------------
 # ROBUST NLP FALLBACK
 # -------------------------------
@@ -48,81 +49,51 @@ def generate_fallback_tag(title):
     return f"#{' '.join(meaningful_words[:3])}"
 
 # -------------------------------
-# HUGGING FACE AI LOGIC
+# GROQ LOGIC
 # -------------------------------
 def get_smart_tag_and_category(title):
-    """Tier 1 Logic: Tries Hugging Face with JSON constraints."""
-    
+    """Tier 1 Logic: Uses Groq (Llama-3) for lightning-fast, guaranteed JSON tagging."""
     cleaned_title = title.split('|')[0].split('-')[0].strip()
     
-    # Check 1: Is the description too small?
     if len(cleaned_title.split()) < 5:
         return None, None
 
-    if not HF_TOKEN:
-        return generate_fallback_tag(cleaned_title), "NO_HF_TOKEN"
+    if not groq_client:
+        return generate_fallback_tag(cleaned_title), "NO_API_KEY"
 
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    # WE USE QWEN'S STRICT CHAT FORMAT TO GUARANTEE JSON
-    prompt = f"""<|im_start|>system
-You are an expert Indian News Editor. Respond ONLY with valid JSON. Do not use markdown wrappers.<|im_end|>
-<|im_start|>user
-Read this headline: "{cleaned_title}"
-Extract a 2 to 3 word tag representing the core entity (e.g., "पश्चिम बंगाल चुनाव", "Stock Market").
-Categorize it strictly into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
-Return ONLY a raw JSON object with keys "tag" and "category".<|im_end|>
-<|im_start|>assistant
-"""
-
-
-
-    payload = {
-        "inputs": prompt, 
-        "parameters": {
-            "max_new_tokens": 50, 
-            "temperature": 0.1,
-            "return_full_text": False
-        }
-    }
-    
     try:
-        # Give it a small pause to respect rate limits
-        time.sleep(0.5) 
-        res = requests.post(HF_API_URL, headers=headers, json=payload, timeout=10)
+        # Groq natively supports forcing JSON output
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an expert Indian News Editor. You must extract a 2-3 word tag (e.g., 'पश्चिम बंगाल चुनाव') and a category (e.g., 'राजनीति', 'व्यापार', 'क्राइम', 'मनोरंजन', 'तकनीक', 'खेल', 'अंतर्राष्ट्रीय', 'समाचार'). Return ONLY a valid JSON object with keys 'tag' and 'category'."
+                },
+                {
+                    "role": "user",
+                    "content": f"Analyze this headline: '{cleaned_title}'"
+                }
+            ],
+            model="llama3-8b-8192",
+            temperature=0.1,
+            response_format={"type": "json_object"} # This guarantees it won't break our code
+        )
         
-        if res.status_code != 200:
-             return generate_fallback_tag(cleaned_title), f"HF_ERR_{res.status_code}"
-             
-        # Extract the generated text
-        raw_text = res.json()[0].get('generated_text', '').strip()
+        # Parse the guaranteed JSON
+        raw_text = chat_completion.choices[0].message.content
+        data = json.loads(raw_text)
         
-        # Strip potential markdown formatting
-        if raw_text.startswith("```"):
-             raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+        tag = data.get("tag", "").strip().replace('#', '')
+        category = data.get("category", "समाचार").strip()
+        
+        if len(tag.split()) > 5 or len(tag) < 2:
+             return generate_fallback_tag(cleaned_title), "TAG_TOO_LONG"
+             
+        return f"#{tag}", category
 
-        try:
-             data = json.loads(raw_text)
-             tag = data.get("tag", "").strip().replace('#', '')
-             category = data.get("category", "समाचार").strip()
-             
-             if len(tag.split()) > 5 or len(tag) < 2:
-                  return generate_fallback_tag(cleaned_title), "HF_TAG_TOO_LONG"
-             
-             return f"#{tag}", category
-             
-        except json.JSONDecodeError:
-             snip = raw_text[:20].replace('\n', '')
-             return generate_fallback_tag(cleaned_title), f"HF_JSON_ERR_{snip}"
-
-    except requests.exceptions.Timeout:
-         return generate_fallback_tag(cleaned_title), "HF_TIMEOUT"
     except Exception as e:
         error_msg = str(e)[:20]
-        return generate_fallback_tag(cleaned_title), f"HF_CRASH_{error_msg}"
+        return generate_fallback_tag(cleaned_title), f"GROQ_ERR_{error_msg}"
 
 def is_similar_topic(new_tag, existing_tag, threshold=0.70):
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
