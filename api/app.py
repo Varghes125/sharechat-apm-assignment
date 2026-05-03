@@ -142,7 +142,7 @@ def update_trends():
 
     # -------- Google News --------
     google_feed = feedparser.parse("https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en")
-    for entry in google_feed.entries[:5]:
+    for entry in google_feed.entries[:10]:
         ts = datetime.datetime(*entry.published_parsed[:6]) if "published_parsed" in entry else datetime.datetime.utcnow()
         raw_data.append({
             "title": entry.title,
