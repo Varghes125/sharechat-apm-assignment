@@ -50,22 +50,23 @@ def generate_fallback_tag(title):
 # GROQ AI BATCH PROCESSING
 # -------------------------------
 def get_batch_tags_and_categories(headlines):
-    """Sends ALL headlines to Groq in a single 1.5s API call to bypass Rate Limits."""
+    """Sends ALL headlines to Groq. API-level JSON lock is removed to prevent 400 errors."""
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
     numbered_list = "\n".join([f"{i}. {h}" for i, h in enumerate(headlines)])
 
-    prompt = f"""Read these {len(headlines)} news headlines carefully.
+    prompt = f"""You are an expert Indian News Editor.
+Read these {len(headlines)} news headlines carefully.
 For EACH headline:
 1. Extract a highly relevant 2 to 3 word tag representing the core theme (e.g., "पश्चिम बंगाल चुनाव", "Stock Market").
 2. Categorize it strictly into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
 
-You must return a valid JSON object containing EXACTLY ONE key called "data", which is an array of exactly {len(headlines)} objects in the exact order provided.
+Return ONLY a valid JSON object. Do not add any text before or after the JSON.
+The JSON must contain exactly one key "data", which is an array of objects in the exact order provided.
 Example format:
 {{
   "data": [
-    {{"tag": "TagHere", "category": "CategoryHere"}},
     {{"tag": "TagHere", "category": "CategoryHere"}}
   ]
 }}
@@ -73,21 +74,23 @@ Example format:
 Headlines:
 {numbered_list}
 """
-try:
-        # Groq Llama 3.1 execution with forced JSON mode
+
+    try:
+        # We removed the response_format dict to bypass Groq's 400 error completely.
         chat_completion = groq_client.chat.completions.create(
             messages=[
-                {"role": "system", "content": "You are an expert Indian News Editor. You must output strictly in JSON format."},
-                # We added the word JSON to the user prompt as well to satisfy Groq's strict 400-error checks
-                {"role": "user", "content": prompt + "\nRemember, return ONLY a valid JSON object."}
+                {"role": "user", "content": prompt}
             ],
-            # CHANGED: Upgraded to the current production model
             model="llama-3.1-8b-instant",
-            temperature=0.1,
-            response_format={"type": "json_object"}
+            temperature=0.0
         )
         
-        raw_text = chat_completion.choices[0].message.content
+        raw_text = chat_completion.choices[0].message.content.strip()
+        
+        # Clean up markdown if the AI adds it (e.g. ```json ... ```)
+        if raw_text.startswith("```"):
+            raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+            
         data_dict = json.loads(raw_text)
         data_array = data_dict.get("data", [])
         
@@ -108,10 +111,8 @@ try:
         return results
         
     except Exception as e:
-        # CHANGED: Increased the error slice to 100 characters so we can see exactly what Groq is complaining about if it fails again
-        error_msg = str(e)[:100] 
+        error_msg = str(e)[:100]
         return [{"tag": generate_fallback_tag(h), "category": f"GROQ_ERR_{error_msg}"} for h in headlines]
-
 def is_similar_topic(new_tag, existing_tag, threshold=0.70):
     """Rule 3: Semantic check to reuse existing tags."""
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
