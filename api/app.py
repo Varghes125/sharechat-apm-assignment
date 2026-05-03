@@ -31,7 +31,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # -------------------------------
-# ROBUST NLP FALLBACK (Rule 2)
+# ROBUST NLP FALLBACK
 # -------------------------------
 HINDI_STOPWORDS = {"में", "के", "और", "पर", "से", "लिए", "है", "की", "को", "ने", "इन", "का", "एक", "यह", "तथा", "वाला", "वाली", "क्या", "क्यों", "कैसे", "कहा", "गया"}
 ENGLISH_STOPWORDS = {"the", "is", "at", "which", "on", "and", "a", "an", "in", "to", "for", "of", "with", "by", "from", "that", "after", "hit", "as", "sees", "news", "live", "updates"}
@@ -84,14 +84,13 @@ Headlines:
         
         raw_text = chat_completion.choices[0].message.content.strip()
         if raw_text.startswith("```"):
-            raw_text = re.sub(r'^
-```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
+            raw_text = re.sub(r'^```(?:json)?|```$', '', raw_text, flags=re.MULTILINE).strip()
             
         data_dict = json.loads(raw_text)
         data_array = data_dict.get("data", [])
         ai_results_by_id = {item.get("id"): item for item in data_array if "id" in item}
         
-        # Mapping English categories back to Hindi if the AI disobeys
+        # Translates Llama's English answers to Hindi
         cat_map = {
             "sports": "खेल", "international": "अंतर्राष्ट्रीय", "politics": "राजनीति", 
             "business": "व्यापार", "technology": "तकनीक", "tech": "तकनीक", 
@@ -104,13 +103,12 @@ Headlines:
                 tag = ai_results_by_id[i].get("tag", "").strip().replace('#', '')
                 cat_raw = ai_results_by_id[i].get("category", "समाचार").strip()
                 
-                # Force category mapping
                 cat = cat_map.get(cat_raw.lower(), cat_raw)
                 
                 if len(tag) < 2:
                     results.append({"tag": generate_fallback_tag(h), "category": "TAG_TOO_SHORT"})
                 else:
-                    # FIX: Truncate long tags instead of throwing an error
+                    # Truncates to 4 words instead of crashing
                     words = tag.split()
                     if len(words) > 4:
                         tag = " ".join(words[:4])
@@ -124,17 +122,14 @@ Headlines:
         error_msg = str(e)[:100]
         return [{"tag": generate_fallback_tag(h), "category": f"GROQ_ERR_{error_msg}"} for h in headlines]
 
-
-
 def is_similar_topic(new_tag, existing_tag, threshold=0.70):
-    """Rule 3: Semantic check to reuse existing tags."""
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
     t2 = existing_tag.replace("#", "").replace(" ", "").lower()
     if t1 in t2 or t2 in t1: return True
     return difflib.SequenceMatcher(None, t1, t2).ratio() > threshold
 
 # -------------------------------
-# DATA COLLECTION (Restored to 40 items)
+# DATA COLLECTION
 # -------------------------------
 def fetch_sources():
     raw_data = []
@@ -144,10 +139,10 @@ def fetch_sources():
         except: return now
 
     sources = [
-        ("Google Trends", "https://trends.google.com/trending/rss?geo=IN", 120),
-        ("Google News", "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi", 85),
-        ("BBC Hindi", "https://feeds.bbci.co.uk/hindi/rss.xml", 85),
-        ("Reddit India", "https://www.reddit.com/r/india/hot/.rss", 70)
+        ("Google Trends", "[https://trends.google.com/trending/rss?geo=IN](https://trends.google.com/trending/rss?geo=IN)", 120),
+        ("Google News", "[https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi](https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi)", 85),
+        ("BBC Hindi", "[https://feeds.bbci.co.uk/hindi/rss.xml](https://feeds.bbci.co.uk/hindi/rss.xml)", 85),
+        ("Reddit India", "[https://www.reddit.com/r/india/hot/.rss](https://www.reddit.com/r/india/hot/.rss)", 70)
     ]
 
     for source_name, url, weight in sources:
@@ -168,13 +163,11 @@ def fetch_sources():
 # -------------------------------
 @app.get("/")
 def root():
-    return {"status": "Running Groq Batch Engine"}
+    return {"status": "Running Final Engine"}
 
 @app.get("/debug_ai")
 def debug_ai():
-    """A dedicated endpoint to test a single headline with Groq."""
     test_headline = "पश्चिम बंगाल में नतीजे से पहले बवाल; भाजपा कार्यकर्ता के घर पर गोलीबारी, 2 गिरफ्तार"
-    # We pass it as a list of 1 because our function expects a batch
     result = get_batch_tags_and_categories([test_headline])[0]
     return {
         "input": test_headline,
@@ -188,7 +181,6 @@ def update_trends():
     
     raw_scraped_data, current_time = fetch_sources()
     
-    # 1. Clean titles & Reject tiny descriptions (Rule 1)
     clean_titles = []
     for item in raw_scraped_data:
         cleaned = item["title"].split('|')[0].split('-')[0].strip()
@@ -197,10 +189,8 @@ def update_trends():
         else:
             clean_titles.append(cleaned)
             
-    # 2. Fire the Batch Groq Request (1 API Call)
     ai_results = get_batch_tags_and_categories(clean_titles)
     
-    # 3. Process, Score, and Cluster
     trend_groups = {}
     for i, item in enumerate(raw_scraped_data):
         if clean_titles[i] == "SKIP": 
@@ -228,12 +218,10 @@ def update_trends():
                 "mentions": 0
             }
 
-        # Context Aggregation
         clean_desc = clean_titles[i]
         if clean_desc not in trend_groups[matched_key]["descriptions"]:
             trend_groups[matched_key]["descriptions"].append(clean_desc)
 
-        # Rule 7: Exponential Time Decay
         hours_old = max(0, (current_time - item["time"]).total_seconds() / 3600)
         time_decay_multiplier = math.exp(-hours_old / 12.0) 
 
@@ -241,21 +229,20 @@ def update_trends():
         trend_groups[matched_key]["sources_involved"].add(item["source"])
         trend_groups[matched_key]["score"] += (item["base_score"] * time_decay_multiplier)
 
-    # --- RANKING & OUTPUT ---
     final_trends = []
     for key, data in trend_groups.items():
         total_score = data["score"]
         sources = list(data["sources_involved"])
         
-        # Rule 7: Consensus Multiplier
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        formatted_descriptions = "\n".join([f"• {desc}" for desc in data["descriptions"][:3]]) 
+        # Selects only the first description instead of merging them
+        primary_description = data["descriptions"][0]
 
         final_trends.append({
             "tag_name": data["tag_name"],
-            "description": formatted_descriptions,
+            "description": primary_description,
             "category": data["category"],       
             "heat_score": int(total_score),
             "source": ", ".join(sources)
