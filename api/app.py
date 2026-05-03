@@ -32,7 +32,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     # Using 'flash' because it is lightning fast and has a massive free tier
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 else:
     model = None
 
@@ -235,24 +235,22 @@ def get_trends():
 
 @app.get("/test_gemini")
 def test_gemini():
-    """Diagnostic tool to list all available models for your specific API Key."""
-    if not GEMINI_API_KEY:
-        return {"status": "error", "message": "GEMINI_API_KEY environment variable is missing."}
+    """A simple endpoint to verify if the Gemini API is connected and working."""
+    if not model:
+        return {
+            "status": "error", 
+            "message": "Gemini model is NOT configured. Your GEMINI_API_KEY environment variable is missing or invalid."
+        }
     
     try:
-        available_models = []
-        # Query Google's servers for models your key has access to
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-                
+        # Send a tiny test prompt to Gemini
+        response = model.generate_content("Hello! Please reply with exactly: 'Gemini is connected and working!'")
         return {
             "status": "success", 
-            "message": "These are the exact model strings your API key supports:",
-            "supported_models": available_models
+            "gemini_response": response.text.strip()
         }
     except Exception as e:
         return {
             "status": "error", 
-            "message": f"Failed to fetch models. Error: {str(e)}"
+            "message": f"Gemini API failed to respond. Error details: {str(e)}"
         }
