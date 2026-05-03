@@ -1,0 +1,12 @@
+name: Trigger Trend Engine
+on:
+  schedule:
+    - cron: "*/30 * * * *" # Runs every 30 minutes
+  workflow_dispatch: # Allows you to run it manually from GitHub too
+
+jobs:
+  ping_server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Update Trends Endpoint
+        run: curl -X GET https://your-app-name.vercel.app/update_trends
