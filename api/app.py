@@ -60,46 +60,58 @@ def generate_fallback_tag(title):
     return f"#{' '.join(meaningful_words[:3])}"
 
 def get_smart_tag_and_category(title):
-    """Tier 1 Logic: Tries Gemini for perfect tagging and categorization."""
+    """Tier 1 Logic: Tries Gemini with JSON output and disabled safety filters."""
     cleaned_title = clean_text(title)
     words = cleaned_title.split()
     
     # RULE 2: Reject small/vague descriptions immediately
-    if len(words) < 5: 
+    if len(words) < 8: 
         return None, None 
 
     if not model: 
         return generate_fallback_tag(cleaned_title), "समाचार"
 
-    # Strict prompt to prevent AI from chatting
-    prompt = f"""You are a News Editor for an Indian audience. Read this headline: "{cleaned_title}"
-Task 1: Extract the core subject in exactly 2 to 3 words. (e.g., पश्चिम बंगाल चुनाव, Share Market). Do NOT use connecting words.
-Task 2: Categorize it into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
-Format EXACTLY as: TAG | CATEGORY
-Do not add any greetings or explanations."""
+    # We now explicitly ask for JSON format
+    prompt = f"""Analyze this news headline: "{cleaned_title}"
+    1. Extract the core entity or topic in exactly 2 to 3 meaningful words (e.g., "पश्चिम बंगाल चुनाव", "Supreme Court", "Share Market"). 
+    2. Strictly remove junk words like 'में', 'के', 'after', 'on', 'killed'.
+    3. Categorize it strictly into ONE of these: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
+    
+    Return a valid JSON object. Use these exact keys: "tag" and "category".
+    """
 
     try:
-        response = model.generate_content(prompt)
-        result_text = response.text.strip()
+        # Force JSON output and turn OFF safety blocks for news headlines
+        response = model.generate_content(
+            prompt,
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            },
+            generation_config={"response_mime_type": "application/json"}
+        )
         
-        # Extract using Regex to ensure format compliance
-        match = re.search(r'([^\n\|]+)\s*\|\s*([^\n]+)', result_text)
-        if match:
-            tag = match.group(1).strip().replace('#', '')
-            category = match.group(2).strip()
+        # Parse the perfect JSON directly
+        data = json.loads(response.text)
+        tag = data.get("tag", "").strip().replace('#', '')
+        category = data.get("category", "समाचार").strip()
+        
+        # Sanity check
+        if len(tag.split()) > 4 or len(tag) < 2:
+            return generate_fallback_tag(cleaned_title), "समाचार"
             
-            # Sanity check: If AI generated a sentence instead of a tag, reject it
-            if len(tag.split()) > 4:
-                return generate_fallback_tag(cleaned_title), "समाचार"
-                
-            return f"#{tag}", category
-            
+        return f"#{tag}", category
+        
     except Exception as e:
-        print(f"Gemini API Error: {e}")
+        # If it fails, print the exact error to Vercel Logs so we can see why
+        print(f"Gemini Error for '{cleaned_title[:20]}...': {e}")
         pass
         
     # If API logic fails, fall back to robust NLP
     return generate_fallback_tag(cleaned_title), "समाचार"
+    
 
 def is_similar_topic(new_tag, existing_tag, threshold=0.65):
     """RULE 3: Semantic Clustering. Checks if #बंगाल चुनाव matches #पश्चिम बंगाल चुनाव."""
