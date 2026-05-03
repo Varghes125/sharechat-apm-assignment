@@ -6,7 +6,7 @@ import requests
 import math
 import difflib
 import re
-from collections import Counter
+import google.generativeai as genai
 from datetime import datetime, timezone
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,9 +27,14 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_KEY")
 supabase = create_client(url, key) if url and key else None
 
-HF_TOKEN = os.environ.get("HUGGINGFACE_TOKEN")
-# Using Mistral for intelligent Entity Extraction
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+# Initialize Gemini
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    # Using 'flash' because it is lightning fast and has a massive free tier
+    model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    model = None
 
 # -------------------------------
 # ROBUST NLP & FALLBACK LOGIC
@@ -47,18 +52,15 @@ def generate_fallback_tag(title):
     cleaned = clean_text(title)
     words = cleaned.split()
     
-    # Filter out stopwords and very short words
     meaningful_words = [w for w in words if w.lower() not in ENGLISH_STOPWORDS and w not in HINDI_STOPWORDS and len(w) > 2]
     
-    # If we still don't have enough, it's not a trend
     if len(meaningful_words) < 2:
         return None
         
-    # Take up to 3 meaningful words to form a coherent phrase
     return f"#{' '.join(meaningful_words[:3])}"
 
 def get_smart_tag_and_category(title):
-    """Tier 1 Logic: Tries LLM for perfect tagging and categorization."""
+    """Tier 1 Logic: Tries Gemini for perfect tagging and categorization."""
     cleaned_title = clean_text(title)
     words = cleaned_title.split()
     
@@ -66,26 +68,19 @@ def get_smart_tag_and_category(title):
     if len(words) < 8: 
         return None, None 
 
-    if not HF_TOKEN: 
+    if not model: 
         return generate_fallback_tag(cleaned_title), "समाचार"
 
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    # Strict prompt to prevent AI from chatting or hallucinating
-    prompt = f"""[INST] You are a News Editor. Read this headline: "{cleaned_title}"
-    Task 1: Extract the core subject in exactly 2 to 3 words. (e.g., पश्चिम बंगाल चुनाव, Share Market). Do NOT use connecting words.
-    Task 2: Categorize it into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
-    Format EXACTLY as: TAG | CATEGORY [/INST]"""
+    # Strict prompt to prevent AI from chatting
+    prompt = f"""You are a News Editor for an Indian audience. Read this headline: "{cleaned_title}"
+Task 1: Extract the core subject in exactly 2 to 3 words. (e.g., पश्चिम बंगाल चुनाव, Share Market). Do NOT use connecting words.
+Task 2: Categorize it into ONE of: राजनीति, तकनीक, मनोरंजन, खेल, व्यापार, अंतर्राष्ट्रीय, क्राइम, समाचार.
+Format EXACTLY as: TAG | CATEGORY
+Do not add any greetings or explanations."""
 
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 15, "temperature": 0.1}}
-    
     try:
-        res = requests.post(HF_API_URL, headers=headers, json=payload, timeout=5)
-        
-        # RULE 5: Catch Rate Limits/API errors silently
-        if 'error' in res.json():
-            return generate_fallback_tag(cleaned_title), "समाचार"
-            
-        result_text = res.json()[0]['generated_text'].strip()
+        response = model.generate_content(prompt)
+        result_text = response.text.strip()
         
         # Extract using Regex to ensure format compliance
         match = re.search(r'([^\n\|]+)\s*\|\s*([^\n]+)', result_text)
@@ -99,10 +94,11 @@ def get_smart_tag_and_category(title):
                 
             return f"#{tag}", category
             
-    except Exception:
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
         pass
         
-    # If all API logic fails, fall back to robust NLP
+    # If API logic fails, fall back to robust NLP
     return generate_fallback_tag(cleaned_title), "समाचार"
 
 def is_similar_topic(new_tag, existing_tag, threshold=0.65):
@@ -110,10 +106,7 @@ def is_similar_topic(new_tag, existing_tag, threshold=0.65):
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
     t2 = existing_tag.replace("#", "").replace(" ", "").lower()
     
-    # Direct substring match (e.g., 'बंगाल चुनाव' is in 'पश्चिम बंगाल चुनाव')
     if t1 in t2 or t2 in t1: return True
-    
-    # Sequence matching for misspellings or slight variations
     return difflib.SequenceMatcher(None, t1, t2).ratio() > threshold
 
 # -------------------------------
@@ -128,7 +121,6 @@ def fetch_sources():
         try: return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
         except: return now
 
-    # High Authority Sources
     sources = [
         ("Google Trends", "https://trends.google.com/trending/rss?geo=IN", 120),
         ("Google News", "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi", 85),
@@ -155,7 +147,7 @@ def fetch_sources():
 # -------------------------------
 @app.get("/")
 def root():
-    return {"message": "ShareChat Trend Engine Active", "status": "Running"}
+    return {"message": "ShareChat Trend Engine Active (Gemini)", "status": "Running"}
 
 @app.get("/update_trends")
 def update_trends():
@@ -165,7 +157,6 @@ def update_trends():
     trend_groups = {}
 
     for item in raw_scraped_data:
-        # Tier 1 & Tier 2 Tagging logic
         smart_tag, category = get_smart_tag_and_category(item["title"])
         
         # RULE 2 Enforced: If tag generator returns None, discard.
@@ -178,7 +169,6 @@ def update_trends():
                 matched_key = existing_key
                 break
         
-        # Initialize a new cluster if it doesn't exist
         if not matched_key:
             matched_key = smart_tag
             trend_groups[matched_key] = {
@@ -196,7 +186,6 @@ def update_trends():
             trend_groups[matched_key]["descriptions"].append(clean_desc)
 
         # RULE 7 Enforced: Sensible Scoring (Exponential Time Decay)
-        # News loses half its value every 12 hours. Pure relevance.
         hours_old = max(0, (current_time - item["time"]).total_seconds() / 3600)
         time_decay_multiplier = math.exp(-hours_old / 12.0) 
 
@@ -211,7 +200,6 @@ def update_trends():
         sources = list(data["sources_involved"])
         
         # RULE 7 Enforced: The Consensus Multiplier
-        # If a topic appears on Reddit AND Google News, it's validated. (1.5x, 2.0x boost)
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
