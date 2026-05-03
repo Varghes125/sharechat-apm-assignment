@@ -50,14 +50,15 @@ def generate_fallback_tag(title):
 # GROQ AI BATCH PROCESSING
 # -------------------------------
 def get_batch_tags_and_categories(headlines):
-    """Sends ALL headlines to Groq with auto-truncation and category mapping."""
+    """Sends ALL headlines to Groq with auto-truncation, category mapping, and strict parsing."""
     if not groq_client or not headlines:
         return [{"tag": generate_fallback_tag(h), "category": "NO_API_KEY"} for h in headlines]
 
+    # FIX 1: Ignore 'SKIP' headlines so the AI doesn't get confused
     numbered_list = "\n".join([f"ID {i}: {h}" for i, h in enumerate(headlines) if h != "SKIP"])
 
     prompt = f"""You are an expert Indian News Editor.
-Read these {len(headlines)} news headlines carefully.
+Read these news headlines carefully.
 For EACH headline, you MUST generate a tag and category. Do not skip any.
 
 Return ONLY a valid JSON object. Do not add any text before or after the JSON.
@@ -75,7 +76,7 @@ Headlines:
 {numbered_list}
 """
 
-try:
+    try:
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
@@ -84,7 +85,7 @@ try:
         
         raw_text = chat_completion.choices[0].message.content.strip()
         
-        # SUPER PARSER: Finds the absolute beginning and end of the JSON bracket
+        # FIX 2: Super Parser - Finds the absolute beginning and end of the JSON bracket
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}')
         if start_idx != -1 and end_idx != -1:
@@ -94,7 +95,6 @@ try:
         data_array = data_dict.get("data", [])
         ai_results_by_id = {item.get("id"): item for item in data_array if "id" in item}
         
-        # Translates Llama's English answers to Hindi
         cat_map = {
             "sports": "खेल", "international": "अंतर्राष्ट्रीय", "politics": "राजनीति", 
             "business": "व्यापार", "technology": "तकनीक", "tech": "तकनीक", 
@@ -103,6 +103,10 @@ try:
         
         results = []
         for i, h in enumerate(headlines):
+            if h == "SKIP":
+                results.append({"tag": None, "category": "SKIP"})
+                continue
+
             if i in ai_results_by_id:
                 tag = ai_results_by_id[i].get("tag", "").strip().replace('#', '')
                 cat_raw = ai_results_by_id[i].get("category", "समाचार").strip()
@@ -112,7 +116,6 @@ try:
                 if len(tag) < 2:
                     results.append({"tag": generate_fallback_tag(h), "category": "TAG_TOO_SHORT"})
                 else:
-                    # Truncates to 4 words instead of crashing
                     words = tag.split()
                     if len(words) > 4:
                         tag = " ".join(words[:4])
@@ -127,6 +130,8 @@ try:
         return [{"tag": generate_fallback_tag(h), "category": f"GROQ_ERR_{error_msg}"} for h in headlines]
 
 def is_similar_topic(new_tag, existing_tag, threshold=0.70):
+    if not new_tag or not existing_tag:
+        return False
     t1 = new_tag.replace("#", "").replace(" ", "").lower()
     t2 = existing_tag.replace("#", "").replace(" ", "").lower()
     if t1 in t2 or t2 in t1: return True
@@ -143,10 +148,10 @@ def fetch_sources():
         except: return now
 
     sources = [
-        ("Google Trends", "[https://trends.google.com/trending/rss?geo=IN](https://trends.google.com/trending/rss?geo=IN)", 120),
-        ("Google News", "[https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi](https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi)", 85),
-        ("BBC Hindi", "[https://feeds.bbci.co.uk/hindi/rss.xml](https://feeds.bbci.co.uk/hindi/rss.xml)", 85),
-        ("Reddit India", "[https://www.reddit.com/r/india/hot/.rss](https://www.reddit.com/r/india/hot/.rss)", 70)
+        ("Google Trends", "https://trends.google.com/trending/rss?geo=IN", 120),
+        ("Google News", "https://news.google.com/rss?hl=hi&gl=IN&ceid=IN:hi", 85),
+        ("BBC Hindi", "https://feeds.bbci.co.uk/hindi/rss.xml", 85),
+        ("Reddit India", "https://www.reddit.com/r/india/hot/.rss", 70)
     ]
 
     for source_name, url, weight in sources:
@@ -203,7 +208,8 @@ def update_trends():
         smart_tag = ai_results[i]["tag"]
         category = ai_results[i]["category"]
         
-        if not smart_tag: continue
+        # FIX 3: Let errors pass through to Supabase so you can monitor them
+        if not smart_tag: continue 
             
         matched_key = None
         for existing_key in trend_groups.keys():
@@ -241,8 +247,8 @@ def update_trends():
         cross_platform_multiplier = 1.0 + (0.5 * (len(sources) - 1))
         total_score *= cross_platform_multiplier
             
-        # Selects only the first description instead of merging them
-        primary_description = data["descriptions"][0]
+        # Extracts only the single primary description
+        primary_description = data["descriptions"][0] if data["descriptions"] else ""
 
         final_trends.append({
             "tag_name": data["tag_name"],
